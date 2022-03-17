@@ -11,6 +11,11 @@ from continuum.scenarios import SegmentationClassIncremental
 from continuum.tasks import TaskSet
 from continuum.download import ProgressBar
 
+from .dataset_mappers.mask_former_instance_dataset_mapper import MaskFormerInstanceDatasetMapper
+from .dataset_mappers.mask_former_semantic_dataset_mapper import MaskFormerSemanticDatasetMapper
+from PIL import Image
+import torch
+
 
 class ContinualDetectron(SegmentationClassIncremental):
     """Continual Segmentation with detectron.
@@ -102,10 +107,36 @@ class ContinualDetectron(SegmentationClassIncremental):
         t = self._get_task_ids(t, task_index)
 
         target_trsf = self._get_label_transformation(task_index)
+
         def mapper_wrapper(dataset_dict):
-            dataset_dict = mapper(dataset_dict)
-            dataset_dict["sem_seg"].apply_(lambda class_id: self.class_mapper(class_id))
-            dataset_dict["sem_seg"] = target_trsf(dataset_dict["sem_seg"])
+            dataset_dict = self.mapper(dataset_dict) if self.mapper is not None else dataset_dict
+            if "sem_seg" is dataset_dict:
+                dataset_dict["sem_seg"].apply_(lambda class_id: self.class_mapper(class_id))
+                dataset_dict["sem_seg"] = target_trsf(dataset_dict["sem_seg"])
+            if "instances" in dataset_dict:
+                """ instances istype Instances (from detectron2.structures.instances) """
+                instances = dataset_dict["instances"]
+                instances.gt_classes.apply_(lambda class_id: self.class_mapper(class_id))
+                instances.gt_classes = target_trsf(instances.gt_classes)
+
+                not_ignore = (instances.gt_classes != 255) & (instances.gt_classes != 0)
+                bkg_idx = instances.gt_classes == 0  # this should have len > 0 only for semseg
+
+                if bkg_idx.sum() > 0:
+                    bkg_mask = instances.gt_masks[bkg_idx].sum(dim=0, keepdim=True).bool()
+                    new_gt_classes = torch.cat((torch.tensor([0]).type_as(instances.gt_classes),
+                                                instances.gt_classes[not_ignore]), dim=0)
+                    new_gt_masks = torch.cat((bkg_mask,
+                                              instances.gt_masks[not_ignore]), dim=0)
+                else:
+                    new_gt_classes = instances.gt_classes[not_ignore]
+                    new_gt_masks = instances.gt_masks[not_ignore]
+                # Work around to reduce the number of instances (modifying in place would make it crash)
+                instances.remove('gt_classes')
+                instances.remove('gt_masks')
+                instances.gt_classes = new_gt_classes
+                instances.gt_masks = new_gt_masks
+
             return dataset_dict
 
         return build_detection_train_loader(
@@ -280,9 +311,21 @@ def _find_classes(image_dict: dict, class_mapper: Optional[Callable] = None) -> 
     :param path: Path to the image.
     :return: Unique classes.
     """
-    if class_mapper:
-        return set(class_mapper(segment["category_id"]) for segment in image_dict["segments_info"])
-    return set(segment["category_id"] for segment in image_dict["segments_info"])
+    if "segments_info" in image_dict:  # Panoptic segmentation case
+        if class_mapper:
+            return set(class_mapper(segment["category_id"]) for segment in image_dict["segments_info"])
+        return set(segment["category_id"] for segment in image_dict["segments_info"])
+    elif 'sem_seg_file_name' in image_dict:  # Semantic segmentation case
+        path = image_dict['sem_seg_file_name']
+        if class_mapper:
+            return set(np.unique(np.array(Image.open(path)).reshape(-1)))
+        return np.unique(np.array(Image.open(path)).reshape(-1))
+    elif 'annotations' in image_dict:  # Instance segmentation case
+        if class_mapper:
+            return set(class_mapper(segment["category_id"]) for segment in image_dict["annotations"])
+        return set(segment["category_id"] for segment in image_dict["annotations"])
+    else:
+        raise NotImplementedError("Unable to infer the correct task in ContinualDetectron.")
 
 
 def _handle_negative_indexes(index: int, total_len: int) -> int:

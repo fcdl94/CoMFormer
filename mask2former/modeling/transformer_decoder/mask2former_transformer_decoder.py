@@ -2,7 +2,7 @@
 # Modified by Bowen Cheng from: https://github.com/facebookresearch/detr/blob/master/models/detr.py
 import logging
 import fvcore.nn.weight_init as weight_init
-from typing import Optional
+from typing import Optional, List
 import torch
 from torch import nn, Tensor
 from torch.nn import functional as F
@@ -12,6 +12,7 @@ from detectron2.layers import Conv2d
 
 from .position_encoding import PositionEmbeddingSine
 from .maskformer_transformer_decoder import TRANSFORMER_DECODER_REGISTRY
+from ..continual import IncrementalClassifier
 
 
 class SelfAttentionLayer(nn.Module):
@@ -247,6 +248,7 @@ class MultiScaleMaskedTransformerDecoder(nn.Module):
         pre_norm: bool,
         mask_dim: int,
         enforce_input_project: bool,
+        classes: Optional[List[int]] = None,
     ):
         """
         NOTE: this interface is experimental.
@@ -310,7 +312,7 @@ class MultiScaleMaskedTransformerDecoder(nn.Module):
             )
 
         self.decoder_norm = nn.LayerNorm(hidden_dim)
-
+        self.num_classes = num_classes
         self.num_queries = num_queries
         # learnable query features
         self.query_feat = nn.Embedding(num_queries, hidden_dim)
@@ -329,8 +331,12 @@ class MultiScaleMaskedTransformerDecoder(nn.Module):
                 self.input_proj.append(nn.Sequential())
 
         # output FFNs
+        self.num_classes = num_classes
         if self.mask_classification:
-            self.class_embed = nn.Linear(hidden_dim, num_classes + 1)
+            if classes is not None:
+                self.class_embed = IncrementalClassifier(classes, channels=hidden_dim)
+            else:
+                self.class_embed = nn.Linear(hidden_dim, num_classes + 1)
         self.mask_embed = MLP(hidden_dim, hidden_dim, mask_dim, 3)
 
     @classmethod
@@ -339,7 +345,13 @@ class MultiScaleMaskedTransformerDecoder(nn.Module):
         ret["in_channels"] = in_channels
         ret["mask_classification"] = mask_classification
         
-        ret["num_classes"] = cfg.MODEL.SEM_SEG_HEAD.NUM_CLASSES
+        if hasattr(cfg, "CONT"):
+            ret["classes"] = [cfg.CONT.BASE_CLS] + cfg.CONT.TASK*[cfg.CONT.INC_CLS]
+            ret["num_classes"] = cfg.CONT.BASE_CLS + cfg.CONT.TASK * cfg.CONT.INC_CLS
+        else:
+            ret["num_classes"] = cfg.MODEL.SEM_SEG_HEAD.NUM_CLASSES
+            if not cfg.MODEL.MASK_FORMER.TEST.MASK_BG:
+                ret["num_classes"] -= 1
         ret["hidden_dim"] = cfg.MODEL.MASK_FORMER.HIDDEN_DIM
         ret["num_queries"] = cfg.MODEL.MASK_FORMER.NUM_OBJECT_QUERIES
         # Transformer parameters:

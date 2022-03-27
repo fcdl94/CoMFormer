@@ -42,6 +42,7 @@ class MaskFormer(nn.Module):
         semantic_on: bool,
         panoptic_on: bool,
         instance_on: bool,
+        mask_bg: bool,
         test_topk_per_image: int,
     ):
         """
@@ -88,6 +89,7 @@ class MaskFormer(nn.Module):
         self.semantic_on = semantic_on
         self.instance_on = instance_on
         self.panoptic_on = panoptic_on
+        self.mask_bg = mask_bg
         self.test_topk_per_image = test_topk_per_image
 
         if not self.semantic_on:
@@ -157,6 +159,7 @@ class MaskFormer(nn.Module):
             "semantic_on": cfg.MODEL.MASK_FORMER.TEST.SEMANTIC_ON,
             "instance_on": cfg.MODEL.MASK_FORMER.TEST.INSTANCE_ON,
             "panoptic_on": cfg.MODEL.MASK_FORMER.TEST.PANOPTIC_ON,
+            "mask_bg":  cfg.MODEL.MASK_FORMER.TEST.MASK_BG,
             "test_topk_per_image": cfg.TEST.DETECTIONS_PER_IMAGE,
         }
 
@@ -202,6 +205,9 @@ class MaskFormer(nn.Module):
             if "instances" in batched_inputs[0]:
                 gt_instances = [x["instances"].to(self.device) for x in batched_inputs]
                 targets = self.prepare_targets(gt_instances, images)
+                if not self.mask_bg:
+                    for tar in targets:
+                        tar['labels'] -= 1
             else:
                 targets = None
 
@@ -237,6 +243,7 @@ class MaskFormer(nn.Module):
                 processed_results.append({})
 
                 if self.sem_seg_postprocess_before_inference:
+                    # That's interpolation to image size
                     mask_pred_result = retry_if_cuda_oom(sem_seg_postprocess)(
                         mask_pred_result, image_size, height, width
                     )
@@ -278,9 +285,26 @@ class MaskFormer(nn.Module):
         return new_targets
 
     def semantic_inference(self, mask_cls, mask_pred):
-        mask_cls = F.softmax(mask_cls, dim=-1)[..., :-1]
         mask_pred = mask_pred.sigmoid()
-        semseg = torch.einsum("qc,qhw->chw", mask_cls, mask_pred)
+        if self.mask_bg:
+            mask_cls = F.softmax(mask_cls, dim=-1)[..., :-1]
+            semseg = torch.einsum("qc,qhw->chw", mask_cls, mask_pred)
+        else:
+            # Assuming mask_pred is NHW (no batch size)
+            mask_cls = F.softmax(mask_cls, dim=-1)
+            scores, labels = mask_cls.max(-1)
+            keep = labels.ne(self.sem_seg_head.num_classes)
+            cur_masks = mask_pred[keep]
+            if cur_masks.shape[0] > 0:
+                cur_scores = mask_cls[keep][..., :-1]  # remove no-class
+                cur_prob_masks = torch.einsum("qc,qhw->chw", cur_scores, cur_masks)  # CHW
+            else:
+                h, w = mask_pred.shape[-2:]
+                cur_prob_masks = torch.zeros((mask_cls.shape[-1]-1, h, w), device=mask_pred.device).type_as(mask_pred)
+
+            bkg = (1 - cur_prob_masks.max(0)[0]).unsqueeze(0)
+            semseg = torch.cat((bkg, cur_prob_masks), dim=0)
+
         return semseg
 
     def panoptic_inference(self, mask_cls, mask_pred):

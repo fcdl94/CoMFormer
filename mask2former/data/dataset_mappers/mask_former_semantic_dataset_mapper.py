@@ -38,6 +38,7 @@ class MaskFormerSemanticDatasetMapper:
         image_format,
         ignore_label,
         size_divisibility,
+        remove_bkg,
     ):
         """
         NOTE: this interface is experimental.
@@ -53,6 +54,7 @@ class MaskFormerSemanticDatasetMapper:
         self.img_format = image_format
         self.ignore_label = ignore_label
         self.size_divisibility = size_divisibility
+        self.remove_bkg = remove_bkg
 
         logger = logging.getLogger(__name__)
         mode = "training" if is_train else "inference"
@@ -85,6 +87,7 @@ class MaskFormerSemanticDatasetMapper:
         dataset_names = cfg.DATASETS.TRAIN
         meta = MetadataCatalog.get(dataset_names[0])
         ignore_label = meta.ignore_label
+        remove_bkg = not cfg.MODEL.MASK_FORMER.TEST.MASK_BG
 
         ret = {
             "is_train": is_train,
@@ -92,6 +95,7 @@ class MaskFormerSemanticDatasetMapper:
             "image_format": cfg.INPUT.FORMAT,
             "ignore_label": ignore_label,
             "size_divisibility": cfg.INPUT.SIZE_DIVISIBILITY,
+            'remove_bkg': remove_bkg
         }
         return ret
 
@@ -164,6 +168,8 @@ class MaskFormerSemanticDatasetMapper:
             classes = np.unique(sem_seg_gt)
             # remove ignored region
             classes = classes[classes != self.ignore_label]
+            if self.remove_bkg:
+                classes = classes[classes != 0]
             instances.gt_classes = torch.tensor(classes, dtype=torch.int64)
 
             masks = []

@@ -1,6 +1,8 @@
 # Copyright (c) Facebook, Inc. and its affiliates.
 # Modified by Bowen Cheng from: https://github.com/facebookresearch/detr/blob/master/models/detr.py
 import fvcore.nn.weight_init as weight_init
+from typing import Optional, List
+
 import torch
 from torch import nn
 from torch.nn import functional as F
@@ -11,6 +13,7 @@ from detectron2.utils.registry import Registry
 
 from .position_encoding import PositionEmbeddingSine
 from .transformer import Transformer
+from ..continual import IncrementalClassifier
 
 
 TRANSFORMER_DECODER_REGISTRY = Registry("TRANSFORMER_MODULE")
@@ -47,6 +50,7 @@ class StandardTransformerDecoder(nn.Module):
         deep_supervision: bool,
         mask_dim: int,
         enforce_input_project: bool,
+        classes: Optional[List[int]] = None,
     ):
         """
         NOTE: this interface is experimental.
@@ -70,6 +74,7 @@ class StandardTransformerDecoder(nn.Module):
         super().__init__()
 
         self.mask_classification = mask_classification
+        self.num_classes = num_classes
 
         # positional encoding
         N_steps = hidden_dim // 2
@@ -100,8 +105,12 @@ class StandardTransformerDecoder(nn.Module):
         self.aux_loss = deep_supervision
 
         # output FFNs
+        self.num_classes = num_classes
         if self.mask_classification:
-            self.class_embed = nn.Linear(hidden_dim, num_classes + 1)
+            if classes is not None:
+                self.class_embed = IncrementalClassifier(classes, channels=hidden_dim)
+            else:
+                self.class_embed = nn.Linear(hidden_dim, num_classes + 1)
         self.mask_embed = MLP(hidden_dim, hidden_dim, mask_dim, 3)
 
     @classmethod
@@ -110,7 +119,14 @@ class StandardTransformerDecoder(nn.Module):
         ret["in_channels"] = in_channels
         ret["mask_classification"] = mask_classification
 
-        ret["num_classes"] = cfg.MODEL.SEM_SEG_HEAD.NUM_CLASSES
+        if hasattr(cfg, "CONT"):
+            ret["classes"] = [cfg.CONT.BASE_CLS] + cfg.CONT.TASK*[cfg.CONT.INC_CLS]
+            ret["num_classes"] = cfg.CONT.BASE_CLS + cfg.CONT.TASK* cfg.CONT.INC_CLS
+        else:
+            ret["num_classes"] = cfg.MODEL.SEM_SEG_HEAD.NUM_CLASSES
+            if not cfg.MODEL.MASK_FORMER.TEST.MASK_BG:
+                ret["num_classes"] -= 1
+
         ret["hidden_dim"] = cfg.MODEL.MASK_FORMER.HIDDEN_DIM
         ret["num_queries"] = cfg.MODEL.MASK_FORMER.NUM_OBJECT_QUERIES
         # Transformer parameters:

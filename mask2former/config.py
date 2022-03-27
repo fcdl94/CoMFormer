@@ -53,6 +53,7 @@ def add_maskformer2_config(cfg):
     # mask_former inference config
     cfg.MODEL.MASK_FORMER.TEST = CN()
     cfg.MODEL.MASK_FORMER.TEST.SEMANTIC_ON = True
+    cfg.MODEL.MASK_FORMER.TEST.MASK_BG = True
     cfg.MODEL.MASK_FORMER.TEST.INSTANCE_ON = False
     cfg.MODEL.MASK_FORMER.TEST.PANOPTIC_ON = False
     cfg.MODEL.MASK_FORMER.TEST.OBJECT_MASK_THRESHOLD = 0.0
@@ -112,3 +113,12 @@ def add_maskformer2_config(cfg):
     # Importance sampling parameter for PointRend point sampling during training. Parametr `beta` in
     # the original paper.
     cfg.MODEL.MASK_FORMER.IMPORTANCE_SAMPLE_RATIO = 0.75
+
+
+def add_continual_config(cfg):
+    cfg.CONT = CN()
+    cfg.CONT.BASE_CLS = 15
+    cfg.CONT.INC_CLS = 5
+    cfg.CONT.ORDER = list(range(1, 21))
+    cfg.CONT.TASK = 0
+    cfg.CONT.WEIGHTS = None

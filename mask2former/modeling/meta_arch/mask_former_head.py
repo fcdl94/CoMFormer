@@ -49,7 +49,6 @@ class MaskFormerHead(nn.Module):
         self,
         input_shape: Dict[str, ShapeSpec],
         *,
-        num_classes: int,
         pixel_decoder: nn.Module,
         loss_weight: float = 1.0,
         ignore_value: int = -1,
@@ -82,7 +81,7 @@ class MaskFormerHead(nn.Module):
         self.predictor = transformer_predictor
         self.transformer_in_feature = transformer_in_feature
 
-        self.num_classes = num_classes
+        self.num_classes = transformer_predictor.num_classes
 
     @classmethod
     def from_config(cls, cfg, input_shape: Dict[str, ShapeSpec]):
@@ -101,7 +100,6 @@ class MaskFormerHead(nn.Module):
                 k: v for k, v in input_shape.items() if k in cfg.MODEL.SEM_SEG_HEAD.IN_FEATURES
             },
             "ignore_value": cfg.MODEL.SEM_SEG_HEAD.IGNORE_VALUE,
-            "num_classes": cfg.MODEL.SEM_SEG_HEAD.NUM_CLASSES,
             "pixel_decoder": build_pixel_decoder(cfg, input_shape),
             "loss_weight": cfg.MODEL.SEM_SEG_HEAD.LOSS_WEIGHT,
             "transformer_in_feature": cfg.MODEL.MASK_FORMER.TRANSFORMER_IN_FEATURE,

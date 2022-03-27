@@ -5,14 +5,12 @@ from functools import partial
 
 import numpy as np
 
-from detectron2.data import build_detection_train_loader
+from detectron2.data import build_detection_train_loader, build_detection_test_loader
 
 from continuum.scenarios import SegmentationClassIncremental
 from continuum.tasks import TaskSet
 from continuum.download import ProgressBar
 
-from .dataset_mappers.mask_former_instance_dataset_mapper import MaskFormerInstanceDatasetMapper
-from .dataset_mappers.mask_former_semantic_dataset_mapper import MaskFormerSemanticDatasetMapper
 from PIL import Image
 import torch
 
@@ -60,7 +58,7 @@ class ContinualDetectron(SegmentationClassIncremental):
         cfg = None
     ) -> None:
         self.mode = mode
-        self.save_indexes = save_indexes
+        self.save_indexes = save_indexes + ".npy"
         self.test_background = test_background
         self._nb_classes = nb_classes
         self.mapper = mapper
@@ -84,6 +82,7 @@ class ContinualDetectron(SegmentationClassIncremental):
         self.increment = increment
         self.initial_increment = initial_increment
         self.class_order = class_order
+        self.keep_bg = cfg.MODEL.MASK_FORMER.TEST.MASK_BG
 
         self._nb_tasks = self._setup(None)
 
@@ -109,10 +108,12 @@ class ContinualDetectron(SegmentationClassIncremental):
         target_trsf = self._get_label_transformation(task_index)
 
         def mapper_wrapper(dataset_dict):
+            # fixme issue, class mapper is employed only after the dataset mapper. It won't work with CTS, ADE
             dataset_dict = self.mapper(dataset_dict) if self.mapper is not None else dataset_dict
-            if "sem_seg" is dataset_dict:
+            if "sem_seg" in dataset_dict:
                 dataset_dict["sem_seg"].apply_(lambda class_id: self.class_mapper(class_id))
                 dataset_dict["sem_seg"] = target_trsf(dataset_dict["sem_seg"])
+                # print(dataset_dict["sem_seg"].unique())
             if "instances" in dataset_dict:
                 """ instances istype Instances (from detectron2.structures.instances) """
                 instances = dataset_dict["instances"]
@@ -122,7 +123,8 @@ class ContinualDetectron(SegmentationClassIncremental):
                 not_ignore = (instances.gt_classes != 255) & (instances.gt_classes != 0)
                 bkg_idx = instances.gt_classes == 0  # this should have len > 0 only for semseg
 
-                if bkg_idx.sum() > 0:
+                if bkg_idx.sum() > 0 and self.keep_bg:
+                    print('Done here')
                     bkg_mask = instances.gt_masks[bkg_idx].sum(dim=0, keepdim=True).bool()
                     new_gt_classes = torch.cat((torch.tensor([0]).type_as(instances.gt_classes),
                                                 instances.gt_classes[not_ignore]), dim=0)
@@ -139,11 +141,20 @@ class ContinualDetectron(SegmentationClassIncremental):
 
             return dataset_dict
 
-        return build_detection_train_loader(
-            self.cfg,
-            mapper=mapper_wrapper,
-            dataset=y
-        )
+        if self.train:
+            print("This is train dataset")
+            return build_detection_train_loader(
+                self.cfg,
+                mapper=mapper_wrapper,
+                dataset=y,
+            )
+        else:
+            print("This is test dataset")
+            return build_detection_test_loader(
+                mapper=mapper_wrapper,
+                dataset=y,
+                num_workers=self.cfg.DATALOADER.NUM_WORKERS,
+            )
 
     def get_original_targets(self, targets: np.ndarray) -> np.ndarray:
         """Returns the original targets not changed by the custom class order.
@@ -207,8 +218,11 @@ class ContinualDetectron(SegmentationClassIncremental):
         return selected_y, selected_t, task_index, data_indexes
 
     @property
-    def train(self):
-        return True
+    def train(self) -> bool:
+        """Returns whether we are in training or testing mode.
+        This property is dependent on the dataset/mapper, not the actual scenario.
+        """
+        return self.mapper.is_train if self.mapper is not None else True
 
     def _setup(self, nb_tasks: int) -> int:
         """Setups the different tasks."""
@@ -231,16 +245,19 @@ class ContinualDetectron(SegmentationClassIncremental):
         # Checkpointing the indexes if the option is enabled.
         # The filtering can take multiple minutes, thus saving/loading them can
         # be useful.
-        if self.save_indexes is not None and os.path.exists(self.save_indexes):
-            print(f"Loading previously saved indexes ({self.save_indexes}).")
-            t = np.load(self.save_indexes)
+        if self.train:
+            if self.save_indexes is not None and os.path.exists(self.save_indexes):
+                print(f"Loading previously saved indexes ({self.save_indexes}).")
+                t = np.load(self.save_indexes)
+            else:
+                print("Computing indexes, it may be slow!")
+                t = _filter_images(
+                    y, self.class_mapper, self._increments, self.class_order, self.mode
+                )
+                if self.save_indexes is not None:
+                    np.save(self.save_indexes, t)
         else:
-            print("Computing indexes, it may be slow!")
-            t = _filter_images(
-                y, self.class_mapper, self._increments, self.class_order, self.mode
-            )
-            if self.save_indexes is not None:
-                np.save(self.save_indexes, t)
+            t = np.ones((len(y), len(self._increments)))
 
         assert len(y) == len(t) and len(t) > 0
 

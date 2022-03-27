@@ -40,5 +40,6 @@ MODEL:
       SEMANTIC_ON: True
       INSTANCE_ON: False
       PANOPTIC_ON: False
+      MASK_BG: False
       OVERLAP_THRESHOLD: 0.8
       OBJECT_MASK_THRESHOLD: 0.8

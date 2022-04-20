@@ -13,7 +13,7 @@ from detectron2.utils.registry import Registry
 
 from .position_encoding import PositionEmbeddingSine
 from .transformer import Transformer
-from ..continual import IncrementalClassifier
+from continual.modeling import IncrementalClassifier
 
 
 TRANSFORMER_DECODER_REGISTRY = Registry("TRANSFORMER_MODULE")
@@ -121,7 +121,10 @@ class StandardTransformerDecoder(nn.Module):
 
         if hasattr(cfg, "CONT"):
             ret["classes"] = [cfg.CONT.BASE_CLS] + cfg.CONT.TASK*[cfg.CONT.INC_CLS]
-            ret["num_classes"] = cfg.CONT.BASE_CLS + cfg.CONT.TASK* cfg.CONT.INC_CLS
+            ret["num_classes"] = cfg.CONT.BASE_CLS + cfg.CONT.TASK*cfg.CONT.INC_CLS
+            if cfg.MODEL.MASK_FORMER.TEST.MASK_BG:
+                ret["num_classes"] += 1
+                ret["classes"][0] += 1
         else:
             ret["num_classes"] = cfg.MODEL.SEM_SEG_HEAD.NUM_CLASSES
             if not cfg.MODEL.MASK_FORMER.TEST.MASK_BG:

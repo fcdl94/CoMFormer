@@ -15,6 +15,8 @@ from detectron2.projects.point_rend.point_features import (
     point_sample,
 )
 
+
+from .matcher import HungarianMatcher
 from ..utils.misc import is_dist_avail_and_initialized, nested_tensor_from_tensor_list
 
 
@@ -85,6 +87,46 @@ def calculate_uncertainty(logits):
     assert logits.shape[1] == 1
     gt_class_logits = logits.clone()
     return -(torch.abs(gt_class_logits))
+
+
+def setup_mask_criterion(cfg, num_classes):
+    deep_supervision = cfg.MODEL.MASK_FORMER.DEEP_SUPERVISION
+    no_object_weight = cfg.MODEL.MASK_FORMER.NO_OBJECT_WEIGHT
+
+    # loss weights
+    class_weight = cfg.MODEL.MASK_FORMER.CLASS_WEIGHT
+    dice_weight = cfg.MODEL.MASK_FORMER.DICE_WEIGHT
+    mask_weight = cfg.MODEL.MASK_FORMER.MASK_WEIGHT
+
+    # building criterion
+    matcher = HungarianMatcher(
+        cost_class=class_weight,
+        cost_mask=mask_weight,
+        cost_dice=dice_weight,
+        num_points=cfg.MODEL.MASK_FORMER.TRAIN_NUM_POINTS,
+    )
+
+    weight_dict = {"loss_ce": class_weight, "loss_mask": mask_weight, "loss_dice": dice_weight}
+
+    if deep_supervision:
+        dec_layers = cfg.MODEL.MASK_FORMER.DEC_LAYERS
+        aux_weight_dict = {}
+        for i in range(dec_layers - 1):
+            aux_weight_dict.update({k + f"_{i}": v for k, v in weight_dict.items()})
+        weight_dict.update(aux_weight_dict)
+
+    losses = ["labels", "masks"]
+
+    return SetCriterion(
+        num_classes,
+        matcher=matcher,
+        weight_dict=weight_dict,
+        eos_coef=no_object_weight,
+        losses=losses,
+        num_points=cfg.MODEL.MASK_FORMER.TRAIN_NUM_POINTS,
+        oversample_ratio=cfg.MODEL.MASK_FORMER.OVERSAMPLE_RATIO,
+        importance_sample_ratio=cfg.MODEL.MASK_FORMER.IMPORTANCE_SAMPLE_RATIO,
+    )
 
 
 class SetCriterion(nn.Module):

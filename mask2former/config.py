@@ -30,6 +30,7 @@ def add_maskformer2_config(cfg):
     cfg.MODEL.MASK_FORMER = CN()
 
     # loss
+    cfg.MODEL.MASK_FORMER.PER_PIXEL = False
     cfg.MODEL.MASK_FORMER.DEEP_SUPERVISION = True
     cfg.MODEL.MASK_FORMER.NO_OBJECT_WEIGHT = 0.1
     cfg.MODEL.MASK_FORMER.CLASS_WEIGHT = 1.0
@@ -115,10 +116,3 @@ def add_maskformer2_config(cfg):
     cfg.MODEL.MASK_FORMER.IMPORTANCE_SAMPLE_RATIO = 0.75
 
 
-def add_continual_config(cfg):
-    cfg.CONT = CN()
-    cfg.CONT.BASE_CLS = 15
-    cfg.CONT.INC_CLS = 5
-    cfg.CONT.ORDER = list(range(1, 21))
-    cfg.CONT.TASK = 0
-    cfg.CONT.WEIGHTS = None

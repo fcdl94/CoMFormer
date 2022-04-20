@@ -13,7 +13,7 @@ from continuum.download import ProgressBar
 
 from PIL import Image
 import torch
-
+import logging
 
 class ContinualDetectron(SegmentationClassIncremental):
     """Continual Segmentation with detectron.
@@ -102,6 +102,8 @@ class ContinualDetectron(SegmentationClassIncremental):
         if isinstance(task_index, slice) and task_index.step is not None:
             raise ValueError("Step in slice for segmentation is not supported.")
 
+        logger = logging.getLogger(__name__)
+
         y, t, task_index, _ = self._select_data_by_task(task_index)
         t = self._get_task_ids(t, task_index)
 
@@ -124,7 +126,6 @@ class ContinualDetectron(SegmentationClassIncremental):
                 bkg_idx = instances.gt_classes == 0  # this should have len > 0 only for semseg
 
                 if bkg_idx.sum() > 0 and self.keep_bg:
-                    print('Done here')
                     bkg_mask = instances.gt_masks[bkg_idx].sum(dim=0, keepdim=True).bool()
                     new_gt_classes = torch.cat((torch.tensor([0]).type_as(instances.gt_classes),
                                                 instances.gt_classes[not_ignore]), dim=0)
@@ -142,14 +143,14 @@ class ContinualDetectron(SegmentationClassIncremental):
             return dataset_dict
 
         if self.train:
-            print("This is train dataset")
+            logger.info(f"There are {len(y)} images in the train dataset.")
             return build_detection_train_loader(
                 self.cfg,
                 mapper=mapper_wrapper,
                 dataset=y,
             )
         else:
-            print("This is test dataset")
+            logger.info(f"There are {len(y)} images in the test dataset.")
             return build_detection_test_loader(
                 mapper=mapper_wrapper,
                 dataset=y,

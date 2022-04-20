@@ -15,6 +15,7 @@ except:
 import copy
 import itertools
 import logging
+import wandb
 import os
 
 from collections import OrderedDict
@@ -291,6 +292,10 @@ def setup(args):
     default_setup(cfg, args)
     # Setup logger for "mask_former" module
     setup_logger(output=cfg.OUTPUT_DIR, distributed_rank=comm.get_rank(), name="mask2former")
+    if comm.get_rank() == 0:
+        wandb.init(project="cont_segm", entity="fcdl94", name=cfg.OUTPUT_DIR.split("/")[-1],
+                   config=cfg, sync_tensorboard=True)
+
     return cfg
 
 
@@ -311,7 +316,10 @@ def main(args):
 
     trainer = Trainer(cfg)
     trainer.resume_or_load()
-    return trainer.train()
+    ret = trainer.train()
+    if comm.get_rank() == 0:
+        wandb.finish()
+    return ret
 
 
 if __name__ == "__main__":

@@ -14,7 +14,7 @@ def add_maskformer2_config(cfg):
     # Color augmentation
     cfg.INPUT.COLOR_AUG_SSD = False
     # We retry random cropping until no single category in semantic segmentation GT occupies more
-    # than `SINGLE_CATEGORY_MAX_AREA` part of the crop.
+    # than `SINGLE_CATEGORY_MAX_AREA` part ofFthe crop.
     cfg.INPUT.CROP.SINGLE_CATEGORY_MAX_AREA = 1.0
     # Pad image and segmentation GT in dataset mapper.
     cfg.INPUT.SIZE_DIVISIBILITY = -1
@@ -25,6 +25,7 @@ def add_maskformer2_config(cfg):
     # optimizer
     cfg.SOLVER.OPTIMIZER = "ADAMW"
     cfg.SOLVER.BACKBONE_MULTIPLIER = 0.1
+    cfg.SOLVER.HEAD_MULTIPLIER = 1.0
 
     # mask_former model config
     cfg.MODEL.MASK_FORMER = CN()
@@ -36,6 +37,9 @@ def add_maskformer2_config(cfg):
     cfg.MODEL.MASK_FORMER.CLASS_WEIGHT = 1.0
     cfg.MODEL.MASK_FORMER.DICE_WEIGHT = 1.0
     cfg.MODEL.MASK_FORMER.MASK_WEIGHT = 20.0
+    cfg.MODEL.MASK_FORMER.CLASS_WEIGHT_MATCH = -1.
+    cfg.MODEL.MASK_FORMER.DICE_WEIGHT_MATCH = -1.
+    cfg.MODEL.MASK_FORMER.MASK_WEIGHT_MATCH = -1.
 
     # transformer config
     cfg.MODEL.MASK_FORMER.NHEADS = 8

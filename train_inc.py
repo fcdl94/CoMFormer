@@ -13,6 +13,7 @@ try:
 except:
     pass
 
+# print("before copy")
 import copy
 import itertools
 import logging
@@ -21,10 +22,11 @@ import os
 import weakref
 from collections import OrderedDict
 from typing import Any, Dict, List, Set
-
+# print("before torch")
 import torch
 from fvcore.nn.precise_bn import get_bn_modules
 
+# print("before detectron")
 # Detectron
 from detectron2.modeling import build_model
 import detectron2.utils.comm as comm
@@ -51,6 +53,7 @@ from detectron2.engine.train_loop import SimpleTrainer, AMPTrainer, TrainerBase
 from detectron2.engine import hooks
 from detectron2.engine.defaults import create_ddp_model, default_writers
 
+# print("before mask2former")
 # MaskFormer
 from mask2former import (
     MaskFormerSemanticDatasetMapper,
@@ -58,11 +61,14 @@ from mask2former import (
     add_maskformer2_config,
 )
 
+# print("before continual")
 from continual import add_continual_config
 from continual.data import ContinualDetectron, class_mapper
 from continual.evaluation import ContinualSemSegEvaluator
 from continual.method_wrapper import build_wrapper
 from continual.utils.hooks import BetterPeriodicCheckpointer, BetterEvalHook
+
+# print('done')
 
 
 class IncrementalTrainer(TrainerBase):
@@ -275,6 +281,10 @@ class IncrementalTrainer(TrainerBase):
                 hyperparams = copy.copy(defaults)
                 if "backbone" in module_name:
                     hyperparams["lr"] = hyperparams["lr"] * cfg.SOLVER.BACKBONE_MULTIPLIER
+                # if "sem_seg_head.predictor.mask_embed" in module_name:
+                #     hyperparams["lr"] = hyperparams["lr"] * cfg.SOLVER.HEAD_MULTIPLIER
+                # if "sem_seg_head.predictor.class_embed" in module_name:
+                #     hyperparams["lr"] = hyperparams["lr"] * cfg.SOLVER.HEAD_MULTIPLIER
                 if (
                         "relative_position_bias_table" in module_param_name
                         or "absolute_pos_embed" in module_param_name
@@ -285,6 +295,7 @@ class IncrementalTrainer(TrainerBase):
                     hyperparams["weight_decay"] = weight_decay_norm
                 if isinstance(module, torch.nn.Embedding):
                     hyperparams["weight_decay"] = weight_decay_embed
+                    # hyperparams["lr"] = hyperparams["lr"] * cfg.SOLVER.HEAD_MULTIPLIER
                 params.append({"params": [value], **hyperparams})
 
         def maybe_add_full_model_gradient_clipping(optim):
@@ -382,10 +393,10 @@ class IncrementalTrainer(TrainerBase):
                 # Mask2Former related:
                 mapper=mapper, cfg=cfg
             )
-            cls.scenario = scenario
+            cls.scenario = scenario[cfg.CONT.TASK]
         else:
-            scenario = cls.scenario
-        return scenario[cfg.CONT.TASK]
+            print("Using computed scenario.")
+        return cls.scenario
 
     @classmethod
     def build_evaluator(cls, cfg, dataset_name, output_folder=None):
@@ -539,16 +550,25 @@ class IncrementalTrainer(TrainerBase):
     def write_results(self, results):
         name = self.cfg.NAME
         path = f"results/{self.cfg.TASK_NAME}.csv"
+        path_acc = f"results/{self.cfg.TASK_NAME}_acc.csv"
         if "sem_seg" in results:
             res = results['sem_seg']
             cls_iou = []
+            cls_acc = []
             for k in res:
                 if k.startswith("IoU-"):
                     cls_iou.append(res[k])
+                if k.startswith("ACC-"):
+                    cls_acc.append(res[k])
 
             with open(path, "a") as out:
                 out.write(f"{name},{self.cfg.CONT.TASK},{res['mIoU_base']},{res['mIoU_novel']},{res['mIoU']},")
                 out.write(",".join([str(i) for i in cls_iou]))
+                out.write("\n")
+
+            with open(path_acc, "a") as out:
+                out.write(f"{name},{self.cfg.CONT.TASK},{res['mACC']},{res['pACC']},-,")
+                out.write(",".join([str(i) for i in cls_acc]))
                 out.write("\n")
 
 
@@ -574,8 +594,8 @@ def setup(args):
     cfg.OUTPUT_ROOT = cfg.OUTPUT_DIR
     cfg.OUTPUT_DIR = cfg.OUTPUT_DIR + "/" + cfg.TASK_NAME + "/" + cfg.NAME + "/step" + str(cfg.CONT.TASK)
 
-    if cfg.CONT.TASK > 0:
-        cfg.SOLVER.BASE_LR = 0.00001
+    # if cfg.CONT.TASK > 0:
+    #     cfg.SOLVER.BASE_LR = 0.00001
 
     cfg.freeze()
     default_setup(cfg, args)
@@ -584,7 +604,7 @@ def setup(args):
     setup_logger(output=cfg.OUTPUT_DIR, distributed_rank=comm.get_rank(), name="mask2former")
     if comm.get_rank() == 0:
         wandb.init(project="cont_segm", entity="fcdl94", name=cfg.NAME + "_step" + str(cfg.CONT.TASK),
-                   config=cfg, sync_tensorboard=True, group=cfg.TASK_NAME)
+                   config=cfg, sync_tensorboard=True, group=cfg.TASK_NAME, settings=wandb.Settings(start_method="fork"))
 
     return cfg
 
@@ -598,6 +618,10 @@ def main(args):
             cfg.MODEL.WEIGHTS = cfg.OUTPUT_ROOT + "/" + cfg.TASK_NAME + "/" + cfg.NAME + f"/step{cfg.CONT.TASK - 1}/model_final.pth"
         else:  # load from cfg
             cfg.MODEL.WEIGHTS = cfg.CONT.WEIGHTS
+
+        if cfg.CONT.AUG:
+            # cfg.INPUT.MIN_SIZE_TRAIN = [460, 512, 563, 614, 665, 716, 768, 819, 870, 921, 972, 1024]
+            cfg.INPUT.MIN_SIZE_TRAIN = [460, 512, 563, 614, 665, 716, 768]
         cfg.freeze()
 
     if args.eval_only:

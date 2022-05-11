@@ -6,7 +6,6 @@ from torch.nn import functional as F
 class IncrementalClassifier(nn.Module):
     def __init__(self, classes, norm_feat=False, channels=256):
         super().__init__()
-        classes = [1] + classes
         self.cls = nn.ModuleList(
             [nn.Linear(channels, c, bias=True) for c in classes])
         self.norm_feat = norm_feat

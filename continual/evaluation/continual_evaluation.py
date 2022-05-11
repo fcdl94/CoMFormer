@@ -155,6 +155,8 @@ class ContinualSemSegEvaluator(DatasetEvaluator):
         miou_new = np.sum(iou[self.old_classes:]) / self.new_classes
         miou_novel = np.sum(iou[self.base_classes:]) / self.novel_classes if self.novel_classes > 0 else 0.
 
+        fg_iou = (np.sum(self._conf_matrix[1:-1, 1:-1]) + self._conf_matrix[0, 0]) / np.sum(self._conf_matrix[:-1, :-1])
+
         res = {}
         cls_iou = []
         cls_acc = []
@@ -166,6 +168,7 @@ class ContinualSemSegEvaluator(DatasetEvaluator):
         res["mIoU_base"] = 100 * miou_base
 
         res["fwIoU"] = 100 * fiou
+        res["fgIoU"] = 100 * fg_iou
         for i, name in enumerate(self._class_names):
             res["IoU-{}".format(name)] = 100 * iou[i]
             cls_iou.append(100 * iou[i])
@@ -196,11 +199,12 @@ class ContinualSemSegEvaluator(DatasetEvaluator):
         fig = 1 - (cm.astype('float') / div)
         fig = torch.from_numpy(fig)
         fig = fig.repeat(3, 1, 1)
+        fig[1] = 0.25
+        fig[2] = 1-fig[2]
 
         return fig
 
     def print_on_file(self, results, cls_iou, cls_acc):
-        #fixme change to pandas
         with open(self.output_file_iou, "a") as out:
             out.write(f"{self._name},{self._task},")
             out.write(".".join([str(i) for i in cls_iou]))

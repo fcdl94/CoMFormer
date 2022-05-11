@@ -21,35 +21,15 @@ task=voc_19-1-dis
 #cont_args="CONT.BASE_CLS 19 CONT.INC_CLS 1 CONT.MODE overlap"
 #task=voc_19-1-ov
 
-name=PerPixel_4L
-meth_args="MODEL.MASK_FORMER.TEST.MASK_BG True MODEL.MASK_FORMER.PER_PIXEL True"
+name=MF_4L
+meth_args="MODEL.MASK_FORMER.TEST.MASK_BG False MODEL.MASK_FORMER.PER_PIXEL False"
+meth_args="${meth_args} MODEL.MASK_FORMER.DICE_WEIGHT 1. MODEL.MASK_FORMER.CLASS_WEIGHT 2. MODEL.MASK_FORMER.MASK_WEIGHT 1."
 comm_args="--dist-url tcp://127.0.0.1:${port} OUTPUT_DIR ${base} ${meth_args} ${cont_args}"
-inc_args="CONT.TASK 1 CONT.WEIGHTS ${base}/${task}/${name}/step0/model_final.pth SOLVER.BASE_LR 0.00001 SOLVER.MAX_ITER 1000"
-##
-#python train_inc.py --num-gpus 2 --config-file ${cfg_file} ${comm_args} NAME ${name} CONT.TASK 0
-#
-#python train_inc.py --num-gpus 2 --config-file ${cfg_file} ${comm_args} ${inc_args} NAME ${name}_UCE CONT.DIST.UCE True
-#python train_inc.py --num-gpus 2 --config-file ${cfg_file} ${comm_args} ${inc_args} NAME ${name}_LWF_100_fix CONT.DIST.KD_WEIGHT 100.
-#python train_inc.py --num-gpus 2 --config-file ${cfg_file} ${comm_args} ${inc_args} NAME ${name}_UCE_LWF_100_fix CONT.DIST.KD_WEIGHT 100. CONT.DIST.UCE True
-#python train_inc.py --num-gpus 2 --config-file ${cfg_file} ${comm_args} ${inc_args} NAME ${name}_UKD_10_fix CONT.DIST.KD_WEIGHT 10. CONT.DIST.UKD True
-#python train_inc.py --num-gpus 2 --config-file ${cfg_file} ${comm_args} ${inc_args} NAME ${name}_UKD_100_fix CONT.DIST.KD_WEIGHT 100. CONT.DIST.UKD True
-#python train_inc.py --num-gpus 2 --config-file ${cfg_file} ${comm_args} ${inc_args} NAME ${name}_UCE_UKD_10_fix CONT.DIST.KD_WEIGHT 10. CONT.DIST.UCE True CONT.DIST.UKD True
-#python train_inc.py --num-gpus 2 --config-file ${cfg_file} ${comm_args} ${inc_args} NAME ${name}_UCE_UKD_100_fix CONT.DIST.KD_WEIGHT 100. CONT.DIST.UCE True CONT.DIST.UKD True
+inc_args="CONT.TASK 1 CONT.WEIGHTS ${base}/${task}/${name}/step0/model_final.pth SOLVER.MAX_ITER 1000 SOLVER.BASE_LR 0.00001"
+
+python train_inc.py --num-gpus 2 --config-file ${cfg_file} ${comm_args} ${inc_args} NAME ${name}_FT
+python train_inc.py --num-gpus 2 --config-file ${cfg_file} ${comm_args} ${inc_args} NAME ${name}_UCE CONT.DIST.UCE True
+python train_inc.py --num-gpus 2 --config-file ${cfg_file} ${comm_args} ${inc_args} NAME ${name}_LWF20 CONT.DIST.KD_WEIGHT 20.
+python train_inc.py --num-gpus 2 --config-file ${cfg_file} ${comm_args} ${inc_args} NAME ${name}_LWF100 CONT.DIST.KD_WEIGHT 100.
 python train_inc.py --num-gpus 2 --config-file ${cfg_file} ${comm_args} ${inc_args} NAME ${name}_UCE_UKD_20 CONT.DIST.KD_WEIGHT 20. CONT.DIST.UCE True CONT.DIST.UKD True
-python train_inc.py --num-gpus 2 --config-file ${cfg_file} ${comm_args} ${inc_args} NAME ${name}_UCE_UKD_25 CONT.DIST.KD_WEIGHT 25. CONT.DIST.UCE True CONT.DIST.UKD True
-
-
-
-#name=MF_4L
-#meth_args="MODEL.MASK_FORMER.TEST.MASK_BG False MODEL.MASK_FORMER.PER_PIXEL False"
-#meth_args="${meth_args} MODEL.MASK_FORMER.DICE_WEIGHT 1. MODEL.MASK_FORMER.CLASS_WEIGHT 2. MODEL.MASK_FORMER.MASK_WEIGHT 1."
-##meth_args="${meth_args} MODEL.MASK_FORMER.DICE_WEIGHT 0. MODEL.MASK_FORMER.CLASS_WEIGHT 2. MODEL.MASK_FORMER.MASK_WEIGHT 1."
-#comm_args="--dist-url tcp://127.0.0.1:${port}  OUTPUT_DIR ${base} ${meth_args} ${cont_args}"
-#inc_args="CONT.TASK 1 CONT.WEIGHTS ${base}/${task}/${name}/step0/model_final.pth SOLVER.BASE_LR 0.00001 SOLVER.MAX_ITER 1000"
-#
-#python train_inc.py --resume --num-gpus 2 --config-file ${cfg_file} ${comm_args} NAME ${name} CONT.TASK 0
-#
-#python train_inc.py --num-gpus 2 --config-file ${cfg_file} ${comm_args} ${inc_args} NAME ${name}_FT
-#python train_inc.py --num-gpus 2 --config-file ${cfg_file} ${comm_args} ${inc_args} NAME ${name}_LWF_100 CONT.DIST.KD_WEIGHT 100.
-#python train_inc.py --num-gpus 2 --config-file ${cfg_file} ${comm_args} ${inc_args} NAME ${name}_UCE_LWF_100 CONT.DIST.KD_WEIGHT 100. CONT.DIST.UCE True
-#python train_inc.py --num-gpus 2 --config-file ${cfg_file} ${comm_args} ${inc_args} NAME ${name}_UCE_UKD_100 CONT.DIST.KD_WEIGHT 100. CONT.DIST.UCE True CONT.DIST.UKD True
+python train_inc.py --num-gpus 2 --config-file ${cfg_file} ${comm_args} ${inc_args} NAME ${name}_UCE_UKD_100 CONT.DIST.KD_WEIGHT 100. CONT.DIST.UCE True CONT.DIST.UKD True

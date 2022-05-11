@@ -312,7 +312,6 @@ class MaskFormer(nn.Module):
     def prepare_semantic_train(outputs, targets, mask_bg=True):
         logits, mask = outputs["pred_logits"], outputs["pred_masks"]
         mask = mask.sigmoid()
-        Q = mask.shape[1]
         if mask_bg:
             semseg = torch.einsum("bqc,bqhw->bchw", logits, mask)
             semseg = semseg[:, :-1]  # Exclude no class since we have Bkg class
@@ -333,12 +332,13 @@ class MaskFormer(nn.Module):
         else:
             # Assuming mask_pred is NHW (no batch size)
             scores, labels = F.softmax(mask_cls, dim=-1).max(-1)
+            # mask_pred = mask_pred > 0.5
 
             h, w = mask_pred.shape[-2:]
             keep = labels.ne(self.sem_seg_head.num_classes) & (scores > self.object_mask_threshold)
             cur_scores = scores[keep]
             cur_classes = labels[keep]
-            cur_masks = mask_pred[keep]
+            cur_masks = mask_pred[keep]  # sigmoid done up.
 
             cur_prob_masks = cur_scores.view(-1, 1, 1) * cur_masks
 
@@ -356,6 +356,8 @@ class MaskFormer(nn.Module):
                     mask_area = (cur_mask_ids == k).sum().item()
                     original_area = (cur_masks[k] >= 0.5).sum().item()
                     mask = (cur_mask_ids == k) & (cur_masks[k] >= 0.5)
+                    #fixme mask_area should be computed differently !
+                    # mask_area = mask.sum().item()
 
                     if mask_area > 0 and original_area > 0 and mask.sum().item() > 0:
                         if mask_area / original_area < self.overlap_threshold:

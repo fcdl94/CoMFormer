@@ -248,6 +248,7 @@ class MultiScaleMaskedTransformerDecoder(nn.Module):
         pre_norm: bool,
         mask_dim: int,
         enforce_input_project: bool,
+        inc_query: bool,
         classes: Optional[List[int]] = None,
     ):
         """
@@ -314,10 +315,14 @@ class MultiScaleMaskedTransformerDecoder(nn.Module):
         self.decoder_norm = nn.LayerNorm(hidden_dim)
         self.num_classes = num_classes
         self.num_queries = num_queries
-        # learnable query features
-        self.query_feat = nn.Embedding(num_queries, hidden_dim)
-        # learnable query p.e.
-        self.query_embed = nn.Embedding(num_queries, hidden_dim)
+        if inc_query:
+            self.query_feat = nn.ModuleList([nn.Embedding(num_queries*c, hidden_dim) for c in classes])
+            self.query_embed = nn.ModuleList([nn.Embedding(num_queries*c, hidden_dim) for c in classes])
+        else:
+            # learnable query features
+            self.query_feat = nn.Embedding(num_queries, hidden_dim)
+            # learnable query p.e.
+            self.query_embed = nn.Embedding(num_queries, hidden_dim)
 
         # level embedding (we always use 3 scales)
         self.num_feature_levels = 3
@@ -334,7 +339,7 @@ class MultiScaleMaskedTransformerDecoder(nn.Module):
         self.num_classes = num_classes
         if self.mask_classification:
             if classes is not None:
-                self.class_embed = IncrementalClassifier(classes, channels=hidden_dim)
+                self.class_embed = IncrementalClassifier([1] + classes, channels=hidden_dim)
             else:
                 self.class_embed = nn.Linear(hidden_dim, num_classes + 1)
         self.mask_embed = MLP(hidden_dim, hidden_dim, mask_dim, 3)
@@ -371,6 +376,7 @@ class MultiScaleMaskedTransformerDecoder(nn.Module):
         ret["pre_norm"] = cfg.MODEL.MASK_FORMER.PRE_NORM
         ret["enforce_input_project"] = cfg.MODEL.MASK_FORMER.ENFORCE_INPUT_PROJ
 
+        ret['inc_query'] = cfg.CONT.INC_QUERY
         ret["mask_dim"] = cfg.MODEL.SEM_SEG_HEAD.MASK_DIM
 
         return ret
@@ -397,16 +403,25 @@ class MultiScaleMaskedTransformerDecoder(nn.Module):
         _, bs, _ = src[0].shape
 
         # QxNxC
-        query_embed = self.query_embed.weight.unsqueeze(1).repeat(1, bs, 1)
-        output = self.query_feat.weight.unsqueeze(1).repeat(1, bs, 1)
+        if isinstance(self.query_feat, nn.ModuleList):
+            query_embed = torch.cat([emb.weight for emb in self.query_embed], dim=0)
+            query_embed = query_embed.unsqueeze(1).repeat(1, bs, 1)
+            output = torch.cat([emb.weight for emb in self.query_feat], dim=0)
+            output = output.unsqueeze(1).repeat(1, bs, 1)
+        else:
+            query_embed = self.query_embed.weight.unsqueeze(1).repeat(1, bs, 1)
+            output = self.query_feat.weight.unsqueeze(1).repeat(1, bs, 1)
 
         predictions_class = []
         predictions_mask = []
+        query_feat = []
 
         # prediction heads on learnable query features
-        outputs_class, outputs_mask, attn_mask = self.forward_prediction_heads(output, mask_features, attn_mask_target_size=size_list[0])
+        outputs_class, outputs_mask, attn_mask = self.forward_prediction_heads(output, mask_features,
+                                                                               attn_mask_target_size=size_list[0])
         predictions_class.append(outputs_class)
         predictions_mask.append(outputs_mask)
+        query_feat.append(output)
 
         for i in range(self.num_layers):
             level_index = i % self.num_feature_levels
@@ -430,7 +445,9 @@ class MultiScaleMaskedTransformerDecoder(nn.Module):
                 output
             )
 
-            outputs_class, outputs_mask, attn_mask = self.forward_prediction_heads(output, mask_features, attn_mask_target_size=size_list[(i + 1) % self.num_feature_levels])
+            outputs_class, outputs_mask, attn_mask = self.forward_prediction_heads(output, mask_features,
+                                                                                   attn_mask_target_size=size_list[(i + 1) % self.num_feature_levels])
+            query_feat.append(output)
             predictions_class.append(outputs_class)
             predictions_mask.append(outputs_mask)
 
@@ -441,7 +458,9 @@ class MultiScaleMaskedTransformerDecoder(nn.Module):
             'pred_masks': predictions_mask[-1],
             'aux_outputs': self._set_aux_loss(
                 predictions_class if self.mask_classification else None, predictions_mask
-            )
+            ),
+            'query': query_feat,
+            'features': mask_features
         }
         return out
 

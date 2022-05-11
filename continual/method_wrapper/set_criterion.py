@@ -1,6 +1,5 @@
 import torch
 import torch.nn.functional as F
-from torch import nn
 
 from detectron2.utils.comm import get_world_size
 from detectron2.projects.point_rend.point_features import (
@@ -8,7 +7,6 @@ from detectron2.projects.point_rend.point_features import (
     point_sample,
 )
 
-from mask2former.modeling.matcher import HungarianMatcher
 from mask2former.utils.misc import is_dist_avail_and_initialized, nested_tensor_from_tensor_list
 from mask2former.modeling.criterion import calculate_uncertainty, dice_loss_jit, sigmoid_ce_loss_jit, SetCriterion
 
@@ -20,7 +18,7 @@ def focal_loss(inputs, targets, weights, alpha=1, gamma=2):
     return focal_loss.mean()
 
 
-def unbiased_cross_entropy_loss(inputs, targets, weights, old_cl):
+def unbiased_cross_entropy_loss(inputs, targets, old_cl, weights=None, reduction='mean'):
     outputs = torch.zeros_like(inputs)  # B, C (1+V+N), H, W
     den = torch.logsumexp(inputs, dim=1)  # B, H, W       den of softmax
 
@@ -28,44 +26,52 @@ def unbiased_cross_entropy_loss(inputs, targets, weights, old_cl):
     outputs[:, -1] = torch.logsumexp(to_sum, dim=1) - den  # B, H, W       p(O)
     outputs[:, :-1] = inputs[:, :-1] - den.unsqueeze(dim=1)  # B, N, H, W    p(N_i)
 
-    loss = F.nll_loss(outputs, targets, weight=weights)
+    loss = F.nll_loss(outputs, targets, weight=weights, reduction=reduction)
 
     return loss
 
 
-def knowledge_distillation_loss(inputs, targets,  weight_eos=1., alpha=1):
+def knowledge_distillation_loss(inputs, targets,  pow_eos=0., alpha=1., use_new=False):
     # ToImprove: use only the logits when no_Class is not maximum (or reweight)
-    # inputs = inputs.narrow(1, 0, targets.shape[1])
-    outputs = torch.log_softmax(inputs, dim=1)  # remove no-class
-    outputs = torch.cat((outputs[:, :targets.shape[1]-1], outputs[:, -1:]), dim=1)  # only old classes or EOS
-    labels = torch.softmax(targets * alpha, dim=1)  # remmove no-class
+    if use_new:
+        outputs = torch.log_softmax(inputs, dim=1)  # remove no-class
+        outputs = torch.cat((outputs[:, :targets.shape[1]-1], outputs[:, -1:]), dim=1)  # only old classes or EOS
+    else:
+        inputs = torch.cat((inputs[:, :targets.shape[1]-1], inputs[:, -1:]), dim=1)  # only old classes or EOS
+        outputs = torch.log_softmax(inputs, dim=1)  # remove no-class
+    labels = torch.softmax(targets * alpha, dim=1)  # remove no-class
 
-    loss = - (outputs * labels)
-    loss[:, -1] *= weight_eos
-    loss = loss.mean(dim=1)
+    weight = (1-labels[:, -1]).pow(pow_eos)  # B, Q
+    loss = - (outputs * labels).sum(dim=1) # B, Q
+    # make weighted average of the queries for each image
+    loss = (weight * loss).sum(dim=1) / weight.sum(dim=1) # B
 
     return torch.mean(loss)
 
 
-def unbiased_knowledge_distillation_loss(inputs, targets, weight_eos=1., alpha=1):
+def unbiased_knowledge_distillation_loss(inputs, targets, pow_eos=0., alpha=1.):
     # ToImprove: use only the logits when no_Class is not maximum (or reweight)
     targets = targets * alpha
 
-    den = torch.logsumexp(inputs, dim=1)  # B, H, W
-    outputs_no_bgk = inputs[:, :targets.shape[1]-1] - den.unsqueeze(dim=1)  # B, OLD_CL, H, W
-    outputs_bkg = torch.logsumexp(inputs[:, targets.shape[1]-1:], dim=1) - den  # B, H, W
-    labels = torch.softmax(targets, dim=1)  # B, BKG + OLD_CL, H, W
+    den = torch.logsumexp(inputs, dim=1)  # B, C
+    outputs_no_bgk = inputs[:, :targets.shape[1]-1] - den.unsqueeze(dim=1)  # B, OLD_CL, Q
+    outputs_bkg = torch.logsumexp(inputs[:, targets.shape[1]-1:], dim=1) - den  # B, Q
+    labels = torch.softmax(targets, dim=1)  # B, BKG + OLD_CL, Q
 
-    # make the average on the classes 1/n_cl \sum{c=1..n_cl} L_c
-    loss = - (labels[:, -1] * outputs_bkg * weight_eos + (labels[:, :-1] * outputs_no_bgk).sum(dim=1)) / targets.shape[1]
+    weight = (1-labels[:, -1]).pow(pow_eos)  # B, Q
+    loss = - (labels[:, -1] * outputs_bkg + (labels[:, :-1] * outputs_no_bgk).sum(dim=1))  # B, Q
+    # make weighted average of the queries for each image
+    loss = (weight * loss).sum(dim=1) / weight.sum(dim=1)  # B
 
+    # finally average on the batch
     return torch.mean(loss)
 
 
 class KDSetCriterion(SetCriterion):
     def __init__(self, num_classes, matcher, weight_dict, eos_coef, losses,
                  num_points, oversample_ratio, importance_sample_ratio,
-                 old_classes=0, use_kd=False, uce=False, ukd=False, use_bkg=False, kd_deep=True):
+                 old_classes=0, use_kd=False, uce=False, ukd=False, use_bkg=False, kd_deep=True,
+                 eos_pow=0., alpha=1., ce_only_new=False, kd_use_novel=False):
         """Create the criterion.
         Parameters:
             num_classes: number of object categories, omitting the special no-object category
@@ -78,9 +84,13 @@ class KDSetCriterion(SetCriterion):
                          num_points, oversample_ratio, importance_sample_ratio)
         self.old_classes = old_classes
         self.uce = uce and old_classes != 0
+        self.ce_only_new = ce_only_new
         self.ukd = ukd
         self.use_kd = use_kd
         self.kd_deep = kd_deep
+        self.eos_pow = eos_pow
+        self.alpha = alpha
+        self.kd_use_novel = kd_use_novel
 
         assert not (use_bkg and (uce or ukd)), "Using background mask is not supported with UCE or UKD distillation."
 
@@ -92,27 +102,32 @@ class KDSetCriterion(SetCriterion):
         src_logits = outputs["pred_logits"].float()
 
         idx = self._get_src_permutation_idx(indices)
-        target_classes_o = torch.cat([t["labels"][J] for t, (_, J) in zip(targets, indices)])
+
+        # full_value = 255 if self.ce_only_new else self.num_classes
         target_classes = torch.full(
             src_logits.shape[:2], self.num_classes, dtype=torch.int64, device=src_logits.device
         )
+        target_classes_o = torch.cat([t["labels"][J] for t, (_, J) in zip(targets, indices)])
         target_classes[idx] = target_classes_o
 
         if self.uce:
             loss_ce = unbiased_cross_entropy_loss(src_logits.transpose(1, 2), target_classes,
-                                                  self.empty_weight, self.old_classes)
+                                                  old_cl=self.old_classes, weights=self.empty_weight, reduction='mean')
         else:
-            loss_ce = F.cross_entropy(src_logits.transpose(1, 2), target_classes, self.empty_weight)
+            loss_ce = F.cross_entropy(src_logits.transpose(1, 2), target_classes, self.empty_weight,
+                                      ignore_index=255, reduction='mean')
+
         losses = {"loss_ce": loss_ce}
 
         if outputs_old is not None:
             tar_logits = outputs_old["pred_logits"].float()
             if self.ukd:
                 loss_kd = unbiased_knowledge_distillation_loss(src_logits.transpose(1, 2), tar_logits.transpose(1, 2),
-                                                               weight_eos=self.eos_coef)
+                                                               pow_eos=self.eos_pow, alpha=self.alpha)
             else:
                 loss_kd = knowledge_distillation_loss(src_logits.transpose(1, 2), tar_logits.transpose(1, 2),
-                                                      weight_eos=self.eos_coef)
+                                                      pow_eos=self.eos_pow, alpha=self.alpha,
+                                                      use_new=self.kd_use_novel)
             losses["loss_kd"] = loss_kd
 
         return losses
@@ -183,9 +198,10 @@ class KDSetCriterion(SetCriterion):
              outputs: dict of tensors, see the output specification of the model for the format
              targets: list of dicts, such that len(targets) == batch_size.
                       The expected keys in each dict depends on the losses applied, see each loss' doc
+                      For mask2Former (or this code), we need labels and masks
              outputs_old:  dict of tensors by old model , see the output specification of the model for the format
         """
-        outputs_without_aux = {k: v for k, v in outputs.items() if k != "aux_outputs"}
+        outputs_without_aux = {k: v for k, v in outputs.items() if "pred" in k}
 
         # Retrieve the matching between the outputs of the last layer and the targets
         indices = self.matcher(outputs_without_aux, targets)

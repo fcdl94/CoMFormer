@@ -1,5 +1,2 @@
-from .dataset_wrapper import ContinualDetectron
-
-
-def class_mapper(x):
-    return x
+from .semantic_wrapper import ContinualDetectron
+from .instance_wrapper import InstanceContinualDetectron

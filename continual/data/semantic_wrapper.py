@@ -14,6 +14,8 @@ from continuum.download import ProgressBar
 from PIL import Image
 import torch
 import logging
+import torchvision
+
 
 class ContinualDetectron(SegmentationClassIncremental):
     """Continual Segmentation with detectron.
@@ -55,6 +57,7 @@ class ContinualDetectron(SegmentationClassIncremental):
         mode: str = "overlap",
         save_indexes: Optional[str] = None,
         test_background: bool = True,
+        masking_value: int = 0,
         cfg = None
     ) -> None:
         self.mode = mode
@@ -62,7 +65,6 @@ class ContinualDetectron(SegmentationClassIncremental):
         self.test_background = test_background
         self._nb_classes = nb_classes
         self.mapper = mapper
-        self.class_mapper = class_mapper
         self.cfg = cfg
 
         if self.mode not in ("overlap", "disjoint", "sequential"):
@@ -83,6 +85,7 @@ class ContinualDetectron(SegmentationClassIncremental):
         self.initial_increment = initial_increment
         self.class_order = class_order
         self.keep_bg = cfg.MODEL.MASK_FORMER.TEST.MASK_BG
+        self.masking_value = masking_value
 
         self._nb_tasks = self._setup(None)
 
@@ -90,6 +93,42 @@ class ContinualDetectron(SegmentationClassIncremental):
     def nb_classes(self) -> int:
         """Total number of classes in the whole continual setting."""
         return self._nb_classes
+
+    def _get_label_transformation(self, task_index: Union[int, List[int]]):
+        """Returns the transformation to apply on the GT segmentation maps.
+
+        :param task_index: The selected task id.
+        :return: A pytorch transformation.
+        """
+        if isinstance(task_index, int):
+            task_index = [task_index]
+        if not self.train:
+            # In testing mode, all labels brought by previous tasks are revealed
+            task_index = list(range(max(task_index) + 1))
+
+        if self.mode in ("overlap", "disjoint"):
+            # Previous and future (for disjoint) classes are hidden
+            labels = self._get_task_labels(task_index)
+        elif self.mode == "sequential":
+            # Previous classes are not hidden, no future classes are present
+            labels = self._get_task_labels(list(range(max(task_index) + 1)))
+        else:
+            raise ValueError(f"Unknown mode={self.mode}.")
+
+        inverted_order = {label: self.class_order.index(label) + 1 for label in labels}
+        inverted_order[255] = 255
+
+        if not self.train:
+            if self.test_background:
+                inverted_order[0] = 0
+            else:
+                inverted_order[0] = 255
+
+        return torchvision.transforms.Lambda(
+            lambda seg_map: seg_map.apply_(
+                lambda v: inverted_order.get(v, self.masking_value)
+            )
+        )
 
     def __getitem__(self, task_index: Union[int, slice]) -> TaskSet:
         """Returns a task by its unique index.
@@ -110,16 +149,13 @@ class ContinualDetectron(SegmentationClassIncremental):
         target_trsf = self._get_label_transformation(task_index)
 
         def mapper_wrapper(dataset_dict):
-            # fixme issue, class mapper is employed only after the dataset mapper. It won't work with CTS, ADE
             dataset_dict = self.mapper(dataset_dict) if self.mapper is not None else dataset_dict
             if "sem_seg" in dataset_dict:
-                dataset_dict["sem_seg"].apply_(lambda class_id: self.class_mapper(class_id))
                 dataset_dict["sem_seg"] = target_trsf(dataset_dict["sem_seg"])
                 # print(dataset_dict["sem_seg"].unique())
             if "instances" in dataset_dict:
                 """ instances istype Instances (from detectron2.structures.instances) """
                 instances = dataset_dict["instances"]
-                instances.gt_classes.apply_(lambda class_id: self.class_mapper(class_id))
                 instances.gt_classes = target_trsf(instances.gt_classes)
 
                 not_ignore = (instances.gt_classes != 255) & (instances.gt_classes != 0)
@@ -253,7 +289,7 @@ class ContinualDetectron(SegmentationClassIncremental):
             else:
                 print("Computing indexes, it may be slow!")
                 t = _filter_images(
-                    y, self.class_mapper, self._increments, self.class_order, self.mode
+                    y, None, self._increments, self.class_order, self.mode
                 )
                 if self.save_indexes is not None:
                     np.save(self.save_indexes, t)

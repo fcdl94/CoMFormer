@@ -12,6 +12,7 @@ from panopticapi.utils import IdGenerator, save_json
 from PIL import Image
 
 ADE20K_SEM_SEG_CATEGORIES = [
+    "void",
     "wall",
     "building",
     "sky",
@@ -165,6 +166,7 @@ ADE20K_SEM_SEG_CATEGORIES = [
 ]
 
 PALETTE = [
+    [0, 0, 0],
     [120, 120, 120],
     [180, 120, 120],
     [6, 230, 230],
@@ -329,9 +331,9 @@ if __name__ == "__main__":
         )
 
         # folder to store panoptic PNGs
-        out_folder = os.path.join(dataset_dir, f"ADEChallengeData2016/ade20k_panoptic_{name}/")
+        out_folder = os.path.join(dataset_dir, f"ADEChallengeData2016/myade20k_panoptic_{name}/")
         # json with segmentations information
-        out_file = os.path.join(dataset_dir, f"ADEChallengeData2016/ade20k_panoptic_{name}.json")
+        out_file = os.path.join(dataset_dir, f"ADEChallengeData2016/myade20k_panoptic_{name}.json")
 
         if not os.path.isdir(out_folder):
             print("Creating folder {} for panoptic segmentation PNGs".format(out_folder))
@@ -350,9 +352,8 @@ if __name__ == "__main__":
                 if i == 0:
                     continue
                 ins_id, sem_id, _ = line.strip().split()
-                # shift id by 1 because we want it to start from 0!
                 # ignore_label becomes 255
-                map_id[int(ins_id) - 1] = int(sem_id) - 1
+                map_id[int(ins_id)] = int(sem_id) # Removed -1 to start from zero
 
         ADE20K_150_CATEGORIES = []
         for cat_id, cat_name in enumerate(ADE20K_SEM_SEG_CATEGORIES):
@@ -398,10 +399,9 @@ if __name__ == "__main__":
             assert sem_seg.dtype == np.uint8
             assert ins_seg.dtype == np.uint8
 
-            semantic_cat_ids = sem_seg - 1
-            instance_cat_ids = ins_seg[..., 0] - 1
-            # instance id starts from 1!
-            # because 0 is reserved as VOID label
+            semantic_cat_ids = sem_seg  # removed -1
+            instance_cat_ids = ins_seg[..., 0]  # removed -1
+            # instance id starts from 1! because 0 is reserved as VOID label
             instance_ins_ids = ins_seg[..., 1]
 
             segm_info = []
@@ -411,7 +411,7 @@ if __name__ == "__main__":
 
             # process stuffs
             for semantic_cat_id in np.unique(semantic_cat_ids):
-                if semantic_cat_id == 255:
+                if semantic_cat_id == 0 or semantic_cat_id == 255:
                     continue
                 if categories_dict[semantic_cat_id]["isthing"]:
                     continue

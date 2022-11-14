@@ -1,1 +1,1 @@
-from .classifier import IncrementalClassifier
+from .classifier import IncrementalClassifier, CosineClassifier

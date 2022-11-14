@@ -1,6 +1,6 @@
 _BASE_: maskformer2_R50_bs16_160k.yaml
 MODEL:
-  WEIGHTS: "R-101.pkl"
+  WEIGHTS: "ckpt/R-101.pkl"
   RESNETS:
     DEPTH: 101
     STEM_TYPE: "basic"  # not used
@@ -9,3 +9,5 @@ MODEL:
     OUT_FEATURES: ["res2", "res3", "res4", "res5"]
     NORM: "SyncBN"
     RES5_MULTI_GRID: [1, 1, 1]  # not used
+CONT:
+  ORDER: !!python/object/apply:eval ["[x for x in range(1, 151)]"]

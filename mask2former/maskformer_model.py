@@ -38,6 +38,7 @@ class MaskFormer(nn.Module):
             pixel_mean: Tuple[float],
             pixel_std: Tuple[float],
             per_pixel: bool = False,
+            softmask: bool = False,
             # inference
             semantic_on: bool,
             panoptic_on: bool,
@@ -79,6 +80,7 @@ class MaskFormer(nn.Module):
         self.num_queries = num_queries
         self.overlap_threshold = overlap_threshold
         self.object_mask_threshold = object_mask_threshold
+        self.mask_threshold = 0.5
         self.metadata = metadata
         if size_divisibility < 0:
             # use backbone size_divisibility if not set
@@ -88,6 +90,7 @@ class MaskFormer(nn.Module):
         self.register_buffer("pixel_mean", torch.Tensor(pixel_mean).view(-1, 1, 1), False)
         self.register_buffer("pixel_std", torch.Tensor(pixel_std).view(-1, 1, 1), False)
         self.per_pixel = per_pixel
+        self.softmask = softmask
 
         # continual
         self.continual = continual
@@ -136,12 +139,13 @@ class MaskFormer(nn.Module):
             ),
             "pixel_mean": cfg.MODEL.PIXEL_MEAN,
             "pixel_std": cfg.MODEL.PIXEL_STD,
-            "per_pixel": cfg.MODEL.MASK_FORMER.PER_PIXEL,
+            "per_pixel": cfg.MODEL.MASK_FORMER.PER_PIXEL and cfg.MODEL.MASK_FORMER.TEST.SEMANTIC_ON,
+            "softmask": cfg.MODEL.MASK_FORMER.SOFTMASK,
             # inference
             "semantic_on": cfg.MODEL.MASK_FORMER.TEST.SEMANTIC_ON,
             "instance_on": cfg.MODEL.MASK_FORMER.TEST.INSTANCE_ON,
             "panoptic_on": cfg.MODEL.MASK_FORMER.TEST.PANOPTIC_ON,
-            "mask_bg": cfg.MODEL.MASK_FORMER.TEST.MASK_BG,
+            "mask_bg": cfg.MODEL.MASK_FORMER.TEST.MASK_BG and cfg.MODEL.MASK_FORMER.TEST.SEMANTIC_ON,
             "test_topk_per_image": cfg.TEST.DETECTIONS_PER_IMAGE,
             # continual
             "continual": continual
@@ -156,7 +160,8 @@ class MaskFormer(nn.Module):
         if "instances" in batched_inputs[0]:
             gt_instances = [x["instances"].to(self.device) for x in batched_inputs]
             targets = MaskFormer.prepare_targets(gt_instances, images.tensor.shape[-2:], per_pixel=self.per_pixel)
-            if not self.mask_bg:
+            # fixme: Assume, for semantic and panoptic, that dataset has background class
+            if not self.mask_bg and (self.semantic_on or self.panoptic_on):
                 for tar in targets:
                     tar['labels'] -= 1
         else:
@@ -192,7 +197,7 @@ class MaskFormer(nn.Module):
 
     def forward_inference(self, images, batched_inputs, outputs):
         mask_cls_results = outputs["pred_logits"]
-        mask_pred_results = outputs["pred_masks"]
+        mask_pred_results = outputs["pred_masks"] if self.softmask else outputs["pred_masks"]
         # upsample masks
         mask_pred_results = F.interpolate(
             mask_pred_results,
@@ -207,8 +212,11 @@ class MaskFormer(nn.Module):
         for mask_cls_result, mask_pred_result, input_per_image, image_size in zip(
                 mask_cls_results, mask_pred_results, batched_inputs, images.image_sizes
         ):
-            height = input_per_image.get("height", image_size[0])
-            width = input_per_image.get("width", image_size[1])
+            if 'sem_seg' in input_per_image and self.continual and self.semantic_on:
+                height, width = input_per_image['sem_seg'].shape
+            else:
+                height = input_per_image.get("height", image_size[0])  # image_size[0]
+                width = input_per_image.get("width", image_size[1])  # image_size[1]
             processed_results.append({})
 
             if self.sem_seg_postprocess_before_inference:
@@ -322,7 +330,7 @@ class MaskFormer(nn.Module):
         return semseg
 
     def semantic_inference(self, mask_cls, mask_pred):
-        mask_pred = mask_pred.sigmoid()
+        mask_pred = mask_pred.sigmoid() if not self.softmask else mask_pred.softmax(dim=0)
         if self.per_pixel:
             semseg = torch.einsum("qc,qhw->chw", mask_cls, mask_pred)[:-1]
             semseg = torch.softmax(semseg, dim=0)
@@ -354,8 +362,8 @@ class MaskFormer(nn.Module):
                 for k in range(cur_classes.shape[0]):
                     pred_class = cur_classes[k].item()
                     mask_area = (cur_mask_ids == k).sum().item()
-                    original_area = (cur_masks[k] >= 0.5).sum().item()
-                    mask = (cur_mask_ids == k) & (cur_masks[k] >= 0.5)
+                    original_area = (cur_masks[k] >= self.mask_threshold).sum().item()
+                    mask = (cur_mask_ids == k) & (cur_masks[k] >= self.mask_threshold)
                     #fixme mask_area should be computed differently !
                     # mask_area = mask.sum().item()
 
@@ -363,13 +371,13 @@ class MaskFormer(nn.Module):
                         if mask_area / original_area < self.overlap_threshold:
                             continue
 
-                        semseg[mask] = pred_class + 1
+                        semseg[mask] = pred_class + 1 # ADD ONE FOR BKG
                 semseg = F.one_hot(semseg, self.num_classes+1).float().permute(2, 0, 1)
         return semseg
 
     def panoptic_inference(self, mask_cls, mask_pred):
         scores, labels = F.softmax(mask_cls, dim=-1).max(-1)
-        mask_pred = mask_pred.sigmoid()
+        mask_pred = mask_pred.sigmoid() if not self.softmask else mask_pred.softmax(dim=0)
 
         keep = labels.ne(self.sem_seg_head.num_classes) & (scores > self.object_mask_threshold)
         cur_scores = scores[keep]
@@ -394,7 +402,7 @@ class MaskFormer(nn.Module):
             cur_mask_ids = cur_prob_masks.argmax(0)
             stuff_memory_list = {}
             for k in range(cur_classes.shape[0]):
-                pred_class = cur_classes[k].item()
+                pred_class = cur_classes[k].item() + 1  # ADD ONE TO MATCH GT
                 isthing = pred_class in self.metadata.thing_dataset_id_to_contiguous_id.values()
                 mask_area = (cur_mask_ids == k).sum().item()
                 original_area = (cur_masks[k] >= 0.5).sum().item()
@@ -431,14 +439,17 @@ class MaskFormer(nn.Module):
 
         # [Q, K]
         scores = F.softmax(mask_cls, dim=-1)[:, :-1]
+        if self.softmask:
+            mask_pred = mask_pred.softmax(dim=0)
+            thr = 0.5
+        else:
+            thr = 0
         labels = torch.arange(self.sem_seg_head.num_classes, device=self.device).unsqueeze(0).repeat(self.num_queries,
                                                                                                      1).flatten(0, 1)
-        # scores_per_image, topk_indices = scores.flatten(0, 1).topk(self.num_queries, sorted=False)
         scores_per_image, topk_indices = scores.flatten(0, 1).topk(self.test_topk_per_image, sorted=False)
         labels_per_image = labels[topk_indices]
 
         topk_indices = topk_indices // self.sem_seg_head.num_classes
-        # mask_pred = mask_pred.unsqueeze(1).repeat(1, self.sem_seg_head.num_classes, 1).flatten(0, 1)
         mask_pred = mask_pred[topk_indices]
 
         # if this is panoptic segmentation, we only keep the "thing" classes
@@ -453,13 +464,70 @@ class MaskFormer(nn.Module):
 
         result = Instances(image_size)
         # mask (before sigmoid)
-        result.pred_masks = (mask_pred > 0).float()
+        result.pred_masks = (mask_pred > thr).float()
         result.pred_boxes = Boxes(torch.zeros(mask_pred.size(0), 4))
         # Uncomment the following to get boxes from masks (this is slow)
         # result.pred_boxes = BitMasks(mask_pred > 0).get_bounding_boxes()
 
         # calculate average mask prob
-        mask_scores_per_image = (mask_pred.sigmoid().flatten(1) * result.pred_masks.flatten(1)).sum(1) / (
+        if not self.softmask:
+            mask_scores_per_image = (mask_pred.sigmoid().flatten(1) * result.pred_masks.flatten(1)).sum(1) / (
+                        result.pred_masks.flatten(1).sum(1) + 1e-6)
+        else:
+            mask_scores_per_image = (mask_pred.flatten(1) * result.pred_masks.flatten(1)).sum(1) / (
+                    result.pred_masks.flatten(1).sum(1) + 1e-6)
+        result.scores = scores_per_image * mask_scores_per_image
+        result.pred_classes = labels_per_image
+        return result
+
+    def instance_inference2(self, mask_cls, mask_pred):
+        # mask_pred is already processed to have the same shape as original input
+        image_size = mask_pred.shape[-2:]
+
+        # [Q, K]
+        scores = F.softmax(mask_cls, dim=-1)[:, :-1]
+        max_s = scores.max(dim=-1)[0]
+        keep = (max_s > 0.05)
+        scores = scores[keep]
+
+        if self.softmask:
+            mask_pred = mask_pred.softmax(dim=0)
+            thr = 0.5
+        else:
+            thr = 0
+        mask_pred = mask_pred[keep]
+
+        labels = torch.arange(self.sem_seg_head.num_classes, device=self.device).unsqueeze(0).repeat(len(keep),
+                                                                                                     1).flatten(0, 1)
+        scores_per_image, topk_indices = scores.flatten(0, 1).topk(self.test_topk_per_image, sorted=False)
+        labels_per_image = labels[topk_indices]
+
+        topk_indices = topk_indices // self.sem_seg_head.num_classes
+        mask_pred = mask_pred[topk_indices]
+
+        # if this is panoptic segmentation, we only keep the "thing" classes
+        if self.panoptic_on:
+            keep = torch.zeros_like(scores_per_image).bool()
+            for i, lab in enumerate(labels_per_image):
+                keep[i] = lab in self.metadata.thing_dataset_id_to_contiguous_id.values()
+
+            scores_per_image = scores_per_image[keep]
+            labels_per_image = labels_per_image[keep]
+            mask_pred = mask_pred[keep]
+
+        result = Instances(image_size)
+        # mask (before sigmoid)
+        result.pred_masks = (mask_pred > thr).float()
+        result.pred_boxes = Boxes(torch.zeros(mask_pred.size(0), 4))
+        # Uncomment the following to get boxes from masks (this is slow)
+        # result.pred_boxes = BitMasks(mask_pred > 0).get_bounding_boxes()
+
+        # calculate average mask prob
+        if not self.softmask:
+            mask_scores_per_image = (mask_pred.sigmoid().flatten(1) * result.pred_masks.flatten(1)).sum(1) / (
+                        result.pred_masks.flatten(1).sum(1) + 1e-6)
+        else:
+            mask_scores_per_image = (mask_pred.flatten(1) * result.pred_masks.flatten(1)).sum(1) / (
                     result.pred_masks.flatten(1).sum(1) + 1e-6)
         result.scores = scores_per_image * mask_scores_per_image
         result.pred_classes = labels_per_image

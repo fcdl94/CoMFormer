@@ -15,67 +15,24 @@ from detectron2.projects.point_rend.point_features import (
     point_sample,
 )
 
-
-from .matcher import HungarianMatcher
+from .matcher import HungarianMatcher, SoftmaxMatcher
 from ..utils.misc import is_dist_avail_and_initialized, nested_tensor_from_tensor_list
+from .mask_losses import dice_loss_jit, sigmoid_ce_loss_jit, softmax_dice_loss_jit, softmax_ce_loss_jit
 
 
-def dice_loss(
-        inputs: torch.Tensor,
-        targets: torch.Tensor,
-        num_masks: float,
-    ):
-    """
-    Compute the DICE loss, similar to generalized IOU for masks
-    Args:
-        inputs: A float tensor of arbitrary shape.
-                The predictions for each example.
-        targets: A float tensor with the same shape as inputs. Stores the binary
-                 classification label for each element in inputs
-                (0 for the negative class and 1 for the positive class).
-    """
-    inputs = inputs.sigmoid()
-    inputs = inputs.flatten(1)
-    numerator = 2 * (inputs * targets).sum(-1)
-    denominator = inputs.sum(-1) + targets.sum(-1)
-    loss = 1 - (numerator + 1) / (denominator + 1)
-    return loss.sum() / num_masks
-
-
-dice_loss_jit = torch.jit.script(
-    dice_loss
-)  # type: torch.jit.ScriptModule
-
-
-def sigmoid_ce_loss(
-        inputs: torch.Tensor,
-        targets: torch.Tensor,
-        num_masks: float,
-    ):
-    """
-    Args:
-        inputs: A float tensor of arbitrary shape.
-                The predictions for each example.
-        targets: A float tensor with the same shape as inputs. Stores the binary
-                 classification label for each element in inputs
-                (0 for the negative class and 1 for the positive class).
-    Returns:
-        Loss tensor
-    """
-    loss = F.binary_cross_entropy_with_logits(inputs, targets, reduction="none")
-
-    return loss.mean(1).sum() / num_masks
-
-
-sigmoid_ce_loss_jit = torch.jit.script(
-    sigmoid_ce_loss
-)  # type: torch.jit.ScriptModule
+def focal_loss(inputs, targets, alpha=10, gamma=2, reduction='mean', ignore_index=255):
+    ce_loss = F.cross_entropy(inputs, targets, reduction="none", ignore_index=ignore_index)
+    pt = torch.exp(-ce_loss)
+    f_loss = alpha * (1 - pt) ** gamma * ce_loss
+    if reduction == 'mean':
+        f_loss = f_loss.mean()
+    return f_loss
 
 
 def calculate_uncertainty(logits):
     """
     We estimate uncerainty as L1 distance between 0.0 and the logit prediction in 'logits' for the
-        foreground class in `classes`.
+        foreground class in `classes`. THIS IS IMPLICLTY BASED ON SIGMOID ACTIVATION!
     Args:
         logits (Tensor): A tensor of shape (R, 1, ...) for class-specific or
             class-agnostic, where R is the total number of predicted masks in all images and C is
@@ -100,12 +57,20 @@ def setup_mask_criterion(cfg, num_classes):
     mask_weight = cx.MASK_WEIGHT
 
     # building criterion
-    matcher = HungarianMatcher(
-        cost_class=class_weight if cx.CLASS_WEIGHT_MATCH < 0 else cx.CLASS_WEIGHT_MATCH,
-        cost_mask=mask_weight if cx.MASK_WEIGHT_MATCH < 0 else cx.MASK_WEIGHT_MATCH,
-        cost_dice=dice_weight if cx.DICE_WEIGHT_MATCH < 0 else cx.DICE_WEIGHT_MATCH,
-        num_points=cfg.MODEL.MASK_FORMER.TRAIN_NUM_POINTS,
-    )
+    if cx.SOFTMASK:
+        matcher = SoftmaxMatcher(
+            cost_class=class_weight,
+            cost_mask=mask_weight,
+            cost_dice=dice_weight,
+            num_points=cfg.MODEL.MASK_FORMER.TRAIN_NUM_POINTS,
+        )
+    else:
+        matcher = HungarianMatcher(
+            cost_class=class_weight,
+            cost_mask=mask_weight,
+            cost_dice=dice_weight,
+            num_points=cfg.MODEL.MASK_FORMER.TRAIN_NUM_POINTS,
+        )
 
     weight_dict = {"loss_ce": class_weight, "loss_mask": mask_weight, "loss_dice": dice_weight}
 
@@ -114,11 +79,14 @@ def setup_mask_criterion(cfg, num_classes):
         aux_weight_dict = {}
         for i in range(dec_layers - 1):
             aux_weight_dict.update({k + f"_{i}": v for k, v in weight_dict.items()})
+        # weight_dict['loss_ce_0'] = 0.
         weight_dict.update(aux_weight_dict)
 
     losses = ["labels", "masks"]
 
-    return SetCriterion(
+    criterion = SoftmaxCriterion if cx.SOFTMASK else SetCriterion
+
+    return criterion(
         num_classes,
         matcher=matcher,
         weight_dict=weight_dict,
@@ -127,6 +95,8 @@ def setup_mask_criterion(cfg, num_classes):
         num_points=cfg.MODEL.MASK_FORMER.TRAIN_NUM_POINTS,
         oversample_ratio=cfg.MODEL.MASK_FORMER.OVERSAMPLE_RATIO,
         importance_sample_ratio=cfg.MODEL.MASK_FORMER.IMPORTANCE_SAMPLE_RATIO,
+        focal=cfg.MODEL.MASK_FORMER.FOCAL, focal_alpha=cfg.MODEL.MASK_FORMER.FOCAL_ALPHA,
+        focal_gamma=cfg.MODEL.MASK_FORMER.FOCAL_GAMMA,
     )
 
 
@@ -138,7 +108,7 @@ class SetCriterion(nn.Module):
     """
 
     def __init__(self, num_classes, matcher, weight_dict, eos_coef, losses,
-                 num_points, oversample_ratio, importance_sample_ratio):
+                 num_points, oversample_ratio, importance_sample_ratio, focal=False, focal_gamma=2, focal_alpha=10):
         """Create the criterion.
         Parameters:
             num_classes: number of object categories, omitting the special no-object category
@@ -161,6 +131,9 @@ class SetCriterion(nn.Module):
         self.num_points = num_points
         self.oversample_ratio = oversample_ratio
         self.importance_sample_ratio = importance_sample_ratio
+        self.focal = focal
+        self.focal_gamma = focal_gamma
+        self.focal_alpha = focal_alpha
 
     def loss_labels(self, outputs, targets, indices, num_masks):
         """Classification loss (NLL)
@@ -176,7 +149,11 @@ class SetCriterion(nn.Module):
         )
         target_classes[idx] = target_classes_o
 
-        loss_ce = F.cross_entropy(src_logits.transpose(1, 2), target_classes, self.empty_weight)
+        if self.focal:
+            loss_ce = focal_loss(src_logits.transpose(1, 2), target_classes,
+                                 gamma=self.focal_gamma, alpha=self.focal_alpha)
+        else:
+            loss_ce = F.cross_entropy(src_logits.transpose(1, 2), target_classes, self.empty_weight)
         losses = {"loss_ce": loss_ce}
         return losses
     
@@ -304,3 +281,67 @@ class SetCriterion(nn.Module):
         _repr_indent = 4
         lines = [head] + [" " * _repr_indent + line for line in body]
         return "\n".join(lines)
+
+
+class SoftmaxCriterion(SetCriterion):
+
+    def loss_masks(self, outputs, targets, indices, num_masks):
+        """Compute the losses related to the masks: the focal loss and the dice loss.
+        targets dicts must contain the key "masks" containing a tensor of dim [nb_target_boxes, h, w]
+        """
+        assert "pred_masks" in outputs
+
+        src_idx = self._get_src_permutation_idx(indices)
+        tgt_idx = self._get_tgt_permutation_idx(indices)
+        src_masks = outputs["pred_masks"].softmax(dim=1)  # Added softmax
+        src_log_masks = torch.log_softmax(outputs["pred_masks"], dim=1)
+        src_masks = src_masks[src_idx]
+        src_log_masks = src_log_masks[src_idx]
+        masks = [t["masks"] for t in targets]
+        # TODO use valid to mask invalid areas due to padding in loss
+        target_masks, valid = nested_tensor_from_tensor_list(masks).decompose()
+        target_masks = target_masks.to(src_masks)
+        target_masks = target_masks[tgt_idx]
+
+        # No need to upsample predictions as we are using normalized coordinates :)
+        # N x 1 x H x W
+        src_masks = src_masks[:, None]
+        src_log_masks = src_log_masks[:, None]
+        target_masks = target_masks[:, None]
+
+        with torch.no_grad():
+            # sample point_coords
+            point_coords = get_uncertain_point_coords_with_randomness(
+                src_masks,
+                lambda logits: calculate_uncertainty(2*logits-1),  # normalize to zero
+                self.num_points,
+                self.oversample_ratio,
+                self.importance_sample_ratio,
+            )
+            # get gt labels
+            point_labels = point_sample(
+                target_masks,
+                point_coords,
+                align_corners=False,
+            ).squeeze(1)
+
+        point_logits = point_sample(
+            src_masks,
+            point_coords,
+            align_corners=False,
+        ).squeeze(1)
+
+        point_log_logits = point_sample(
+            src_log_masks,
+            point_coords,
+            align_corners=False,
+        ).squeeze(1)
+
+        losses = {
+            "loss_mask": softmax_ce_loss_jit(point_log_logits, point_labels, num_masks),
+            "loss_dice": softmax_dice_loss_jit(point_logits, point_labels, num_masks),
+        }
+
+        del src_masks
+        del target_masks
+        return losses

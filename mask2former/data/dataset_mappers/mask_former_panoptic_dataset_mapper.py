@@ -38,6 +38,7 @@ class MaskFormerPanopticDatasetMapper(MaskFormerSemanticDatasetMapper):
         image_format,
         ignore_label,
         size_divisibility,
+        remove_bkg,
     ):
         """
         NOTE: this interface is experimental.
@@ -54,6 +55,7 @@ class MaskFormerPanopticDatasetMapper(MaskFormerSemanticDatasetMapper):
             image_format=image_format,
             ignore_label=ignore_label,
             size_divisibility=size_divisibility,
+            remove_bkg=remove_bkg
         )
 
     def __call__(self, dataset_dict):
@@ -146,8 +148,9 @@ class MaskFormerPanopticDatasetMapper(MaskFormerSemanticDatasetMapper):
         for segment_info in segments_info:
             class_id = segment_info["category_id"]
             if not segment_info["iscrowd"]:
-                classes.append(class_id)
-                masks.append(pan_seg_gt == segment_info["id"])
+                if not (self.remove_bkg and class_id == 0):
+                    classes.append(class_id)
+                    masks.append(pan_seg_gt == segment_info["id"])
 
         classes = np.array(classes)
         instances.gt_classes = torch.tensor(classes, dtype=torch.int64)

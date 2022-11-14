@@ -12,7 +12,7 @@ from detectron2.layers import Conv2d
 
 from .position_encoding import PositionEmbeddingSine
 from .maskformer_transformer_decoder import TRANSFORMER_DECODER_REGISTRY
-from continual.modeling import IncrementalClassifier
+from continual.modeling import IncrementalClassifier, CosineClassifier
 
 
 class SelfAttentionLayer(nn.Module):
@@ -248,7 +248,10 @@ class MultiScaleMaskedTransformerDecoder(nn.Module):
         pre_norm: bool,
         mask_dim: int,
         enforce_input_project: bool,
-        inc_query: bool,
+        softmask: bool = False,
+        inc_query: Optional[bool] = None,
+        cosine: Optional[bool] = False,
+        bias: Optional[bool] = False,
         classes: Optional[List[int]] = None,
     ):
         """
@@ -272,6 +275,7 @@ class MultiScaleMaskedTransformerDecoder(nn.Module):
 
         assert mask_classification, "Only support mask classification model"
         self.mask_classification = mask_classification
+        self.softmask = softmask
 
         # positional encoding
         N_steps = hidden_dim // 2
@@ -315,14 +319,10 @@ class MultiScaleMaskedTransformerDecoder(nn.Module):
         self.decoder_norm = nn.LayerNorm(hidden_dim)
         self.num_classes = num_classes
         self.num_queries = num_queries
-        if inc_query:
-            self.query_feat = nn.ModuleList([nn.Embedding(num_queries*c, hidden_dim) for c in classes])
-            self.query_embed = nn.ModuleList([nn.Embedding(num_queries*c, hidden_dim) for c in classes])
-        else:
-            # learnable query features
-            self.query_feat = nn.Embedding(num_queries, hidden_dim)
-            # learnable query p.e.
-            self.query_embed = nn.Embedding(num_queries, hidden_dim)
+        # learnable query features
+        self.query_feat = nn.Embedding(num_queries, hidden_dim)
+        # learnable query p.e.
+        self.query_embed = nn.Embedding(num_queries, hidden_dim)
 
         # level embedding (we always use 3 scales)
         self.num_feature_levels = 3
@@ -339,7 +339,10 @@ class MultiScaleMaskedTransformerDecoder(nn.Module):
         self.num_classes = num_classes
         if self.mask_classification:
             if classes is not None:
-                self.class_embed = IncrementalClassifier([1] + classes, channels=hidden_dim)
+                if cosine:
+                    self.class_embed = CosineClassifier([1] + classes, channels=hidden_dim)
+                else:
+                    self.class_embed = IncrementalClassifier([1] + classes, channels=hidden_dim, bias=bias)
             else:
                 self.class_embed = nn.Linear(hidden_dim, num_classes + 1)
         self.mask_embed = MLP(hidden_dim, hidden_dim, mask_dim, 3)
@@ -349,16 +352,23 @@ class MultiScaleMaskedTransformerDecoder(nn.Module):
         ret = {}
         ret["in_channels"] = in_channels
         ret["mask_classification"] = mask_classification
-        
+        ret["softmask"] = cfg.MODEL.MASK_FORMER.SOFTMASK
+
         if hasattr(cfg, "CONT"):
+            ret['inc_query'] = cfg.CONT.INC_QUERY
             ret["classes"] = [cfg.CONT.BASE_CLS] + cfg.CONT.TASK*[cfg.CONT.INC_CLS]
             ret["num_classes"] = cfg.CONT.BASE_CLS + cfg.CONT.TASK * cfg.CONT.INC_CLS
-            if cfg.MODEL.MASK_FORMER.TEST.MASK_BG:
+            ret["cosine"] = cfg.CONT.COSINE
+            ret["bias"] = cfg.CONT.USE_BIAS
+            if cfg.MODEL.MASK_FORMER.TEST.MASK_BG and (cfg.MODEL.MASK_FORMER.TEST.SEMANTIC_ON or
+                                                       cfg.MODEL.MASK_FORMER.TEST.PANOPTIC_ON):
                 ret["num_classes"] += 1
                 ret["classes"][0] += 1
         else:
+            ret['inc_query'] = None
             ret["num_classes"] = cfg.MODEL.SEM_SEG_HEAD.NUM_CLASSES
-            if not cfg.MODEL.MASK_FORMER.TEST.MASK_BG:
+            if not cfg.MODEL.MASK_FORMER.TEST.MASK_BG and (cfg.MODEL.MASK_FORMER.TEST.SEMANTIC_ON or
+                                                       cfg.MODEL.MASK_FORMER.TEST.PANOPTIC_ON):
                 ret["num_classes"] -= 1
         ret["hidden_dim"] = cfg.MODEL.MASK_FORMER.HIDDEN_DIM
         ret["num_queries"] = cfg.MODEL.MASK_FORMER.NUM_OBJECT_QUERIES
@@ -376,12 +386,11 @@ class MultiScaleMaskedTransformerDecoder(nn.Module):
         ret["pre_norm"] = cfg.MODEL.MASK_FORMER.PRE_NORM
         ret["enforce_input_project"] = cfg.MODEL.MASK_FORMER.ENFORCE_INPUT_PROJ
 
-        ret['inc_query'] = cfg.CONT.INC_QUERY
         ret["mask_dim"] = cfg.MODEL.SEM_SEG_HEAD.MASK_DIM
 
         return ret
 
-    def forward(self, x, mask_features, mask = None):
+    def forward(self, x, mask_features, mask=None):
         # x is a list of multi-scale feature
         assert len(x) == self.num_feature_levels
         src = []
@@ -459,7 +468,7 @@ class MultiScaleMaskedTransformerDecoder(nn.Module):
             'aux_outputs': self._set_aux_loss(
                 predictions_class if self.mask_classification else None, predictions_mask
             ),
-            'query': query_feat,
+            # 'query': query_feat,
             'features': mask_features
         }
         return out
@@ -476,7 +485,10 @@ class MultiScaleMaskedTransformerDecoder(nn.Module):
         attn_mask = F.interpolate(outputs_mask, size=attn_mask_target_size, mode="bilinear", align_corners=False)
         # must use bool type
         # If a BoolTensor is provided, positions with ``True`` are not allowed to attend while ``False`` values will be unchanged.
-        attn_mask = (attn_mask.sigmoid().flatten(2).unsqueeze(1).repeat(1, self.num_heads, 1, 1).flatten(0, 1) < 0.5).bool()
+        if self.softmask:
+            attn_mask = (attn_mask.softmax(dim=1).flatten(2).unsqueeze(1).repeat(1, self.num_heads, 1, 1).flatten(0, 1) < 0.5).bool()
+        else:
+            attn_mask = (attn_mask.sigmoid().flatten(2).unsqueeze(1).repeat(1, self.num_heads, 1, 1).flatten(0, 1) < 0.5).bool()
         attn_mask = attn_mask.detach()
 
         return outputs_class, outputs_mask, attn_mask

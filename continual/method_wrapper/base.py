@@ -8,7 +8,8 @@ class BaseDistillation:
         self.model = model
         self.model_old = model_old
         self.per_pixel = cfg.MODEL.MASK_FORMER.PER_PIXEL and cfg.MODEL.MASK_FORMER.TEST.SEMANTIC_ON
-        self.use_bg = cfg.MODEL.MASK_FORMER.TEST.MASK_BG or cfg.MODEL.MASK_FORMER.PER_PIXEL
+        self.use_bg = (cfg.MODEL.MASK_FORMER.TEST.MASK_BG or
+                       cfg.MODEL.MASK_FORMER.PER_PIXEL) and cfg.MODEL.MASK_FORMER.TEST.SEMANTIC_ON
 
         self.classes = [cfg.CONT.BASE_CLS] + cfg.CONT.TASK * [cfg.CONT.INC_CLS]
         self.old_classes = cfg.CONT.BASE_CLS + (cfg.CONT.TASK-1) * cfg.CONT.INC_CLS if cfg.CONT.TASK > 0 else -1

@@ -13,7 +13,6 @@ try:
 except:
     pass
 
-# print("before copy")
 import copy
 import itertools
 import logging
@@ -22,11 +21,9 @@ import os
 import weakref
 from collections import OrderedDict
 from typing import Any, Dict, List, Set
-# print("before torch")
 import torch
 from fvcore.nn.precise_bn import get_bn_modules
 
-# print("before detectron")
 # Detectron
 from detectron2.modeling import build_model
 import detectron2.utils.comm as comm
@@ -45,6 +42,7 @@ from detectron2.evaluation import (
     inference_on_dataset,
     print_csv_format,
     verify_results,
+    COCOEvaluator,
 )
 from detectron2.projects.deeplab import add_deeplab_config, build_lr_scheduler
 from detectron2.solver.build import maybe_add_gradient_clipping
@@ -56,17 +54,22 @@ from detectron2.engine.defaults import create_ddp_model, default_writers
 # print("before mask2former")
 # MaskFormer
 from mask2former import (
+    InstanceSegEvaluator,
+    COCOInstanceNewBaselineDatasetMapper,
+    MaskFormerInstanceDatasetMapper,
     MaskFormerSemanticDatasetMapper,
     SemanticSegmentorWithTTA,
     add_maskformer2_config,
+    MaskFormerPanopticDatasetMapper,
 )
 
 # print("before continual")
 from continual import add_continual_config
-from continual.data import ContinualDetectron, class_mapper
-from continual.evaluation import ContinualSemSegEvaluator
+from continual.data import ContinualDetectron, InstanceContinualDetectron
+from continual.evaluation import ContinualSemSegEvaluator, ContinualCOCOPanopticEvaluator
 from continual.method_wrapper import build_wrapper
 from continual.utils.hooks import BetterPeriodicCheckpointer, BetterEvalHook
+from continual.modeling.classifier import WA_Hook
 
 # print('done')
 
@@ -90,13 +93,15 @@ class IncrementalTrainer(TrainerBase):
         # Assume these objects must be constructed in this order.
         model = self.build_model(cfg)
 
-        self.model_old = model_old = self.build_model(cfg, old=True) if cfg.CONT.TASK > 0 else None
+        self.model_old = self.build_model(cfg, old=True) if cfg.CONT.TASK > 0 else None
+        # if self.model_old is not None:
+        #     self.model_old = create_ddp_model(self.model_old, broadcast_buffers=False)
 
         self.optimizer = optimizer = self.build_optimizer(cfg, model)
         self.data_loader = data_loader = self.build_train_loader(cfg)
 
         self.model = model = create_ddp_model(model, broadcast_buffers=False)
-        model_wrapper = build_wrapper(cfg, model, model_old)
+        model_wrapper = build_wrapper(cfg, model, self.model_old)
 
         self._trainer = (AMPTrainer if cfg.SOLVER.AMP.ENABLED else SimpleTrainer)(
             model_wrapper, data_loader, optimizer
@@ -110,7 +115,7 @@ class IncrementalTrainer(TrainerBase):
             trainer=weakref.proxy(self),
         )
         if self.model_old is not None:
-            self.checkpointer_old = DetectionCheckpointer(model_old, cfg.OUTPUT_DIR)
+            self.checkpointer_old = DetectionCheckpointer(self.model_old, cfg.OUTPUT_DIR)
         self.start_iter = 0
         self.max_iter = cfg.SOLVER.MAX_ITER
         self.cfg = cfg
@@ -187,6 +192,10 @@ class IncrementalTrainer(TrainerBase):
             # Here the default print/log frequency of each writer is used.
             # run writers in the end, so that evaluation metrics are written
             ret.append(hooks.PeriodicWriter(self.build_writers(), period=20))
+
+        if self.cfg.CONT.WA_STEP > 0 and self.cfg.CONT.TASK > 0:
+            ret.append(WA_Hook(model=self.model, step=100, distributed=True))
+
         return ret
 
     def build_writers(self):
@@ -281,8 +290,8 @@ class IncrementalTrainer(TrainerBase):
                 hyperparams = copy.copy(defaults)
                 if "backbone" in module_name:
                     hyperparams["lr"] = hyperparams["lr"] * cfg.SOLVER.BACKBONE_MULTIPLIER
-                # if "sem_seg_head.predictor.mask_embed" in module_name:
-                #     hyperparams["lr"] = hyperparams["lr"] * cfg.SOLVER.HEAD_MULTIPLIER
+                if "sem_seg_head.predictor.mask_embed" in module_name:
+                    hyperparams["lr"] = hyperparams["lr"] * cfg.SOLVER.HEAD_MULTIPLIER
                 # if "sem_seg_head.predictor.class_embed" in module_name:
                 #     hyperparams["lr"] = hyperparams["lr"] * cfg.SOLVER.HEAD_MULTIPLIER
                 if (
@@ -340,10 +349,24 @@ class IncrementalTrainer(TrainerBase):
     @classmethod
     def build_train_loader(cls, cfg):
         # Semantic segmentation dataset mapper
-        if cfg.INPUT.DATASET_MAPPER_NAME == "mask_former_semantic" and "voc" in cfg.DATASETS.TRAIN[0]:
+        if cfg.INPUT.DATASET_MAPPER_NAME == "mask_former_semantic":  # and "voc" in cfg.DATASETS.TRAIN[0]:
             mapper = MaskFormerSemanticDatasetMapper(cfg, True)
+            wrapper = ContinualDetectron
+            n_classes = cfg.MODEL.SEM_SEG_HEAD.NUM_CLASSES - 1
+        elif cfg.INPUT.DATASET_MAPPER_NAME == "coco_instance_lsj":
+            mapper = COCOInstanceNewBaselineDatasetMapper(cfg, True)
+            wrapper = InstanceContinualDetectron
+            n_classes = cfg.MODEL.SEM_SEG_HEAD.NUM_CLASSES
+        elif cfg.INPUT.DATASET_MAPPER_NAME == "mask_former_instance":
+            mapper = MaskFormerInstanceDatasetMapper(cfg, True)
+            wrapper = InstanceContinualDetectron
+            n_classes = cfg.MODEL.SEM_SEG_HEAD.NUM_CLASSES
+        elif cfg.INPUT.DATASET_MAPPER_NAME == "mask_former_panoptic":
+            mapper = MaskFormerPanopticDatasetMapper(cfg, True)
+            wrapper = ContinualDetectron
+            n_classes = cfg.MODEL.SEM_SEG_HEAD.NUM_CLASSES - 1  # we have bkg
         else:
-            raise NotImplementedError("At the moment, we support only VOC-segmentation")
+            raise NotImplementedError("At the moment, we support only segmentation")
 
         dataset = get_detection_dataset_dicts(
             cfg.DATASETS.TRAIN,
@@ -353,11 +376,11 @@ class IncrementalTrainer(TrainerBase):
             else 0,
             proposal_files=cfg.DATASETS.PROPOSAL_FILES_TRAIN if cfg.MODEL.LOAD_PROPOSALS else None,
         )
-        scenario = ContinualDetectron(
+        scenario = wrapper(
             dataset,
             # Continuum related:
             initial_increment=cfg.CONT.BASE_CLS, increment=cfg.CONT.INC_CLS,
-            nb_classes=cfg.MODEL.SEM_SEG_HEAD.NUM_CLASSES - 1, class_mapper=class_mapper,
+            nb_classes=n_classes,
             save_indexes=os.getenv("DETECTRON2_DATASETS", "datasets") + '/' + cfg.TASK_NAME,
             mode=cfg.CONT.MODE, class_order=cfg.CONT.ORDER,
             # Mask2Former related:
@@ -373,25 +396,36 @@ class IncrementalTrainer(TrainerBase):
         """
         if not hasattr(cls, "scenario"):
             mapper = DatasetMapper(cfg, False)
+            if cfg.INPUT.DATASET_MAPPER_NAME == "mask_former_semantic":
+                wrapper = ContinualDetectron
+                n_classes = cfg.MODEL.SEM_SEG_HEAD.NUM_CLASSES - 1
+            elif cfg.INPUT.DATASET_MAPPER_NAME == "coco_instance_lsj":
+                wrapper = InstanceContinualDetectron
+                n_classes = cfg.MODEL.SEM_SEG_HEAD.NUM_CLASSES
+            elif cfg.INPUT.DATASET_MAPPER_NAME == "mask_former_instance":
+                wrapper = InstanceContinualDetectron
+                n_classes = cfg.MODEL.SEM_SEG_HEAD.NUM_CLASSES
+            elif cfg.INPUT.DATASET_MAPPER_NAME == "mask_former_panoptic":
+                # mapper = MaskFormerPanopticDatasetMapper(cfg, True)
+                wrapper = ContinualDetectron
+                n_classes = cfg.MODEL.SEM_SEG_HEAD.NUM_CLASSES - 1  # we have bkg
+            else:
+                raise NotImplementedError("At the moment, we support only segmentation")
 
             dataset = get_detection_dataset_dicts(
                 dataset_name,
                 filter_empty=False,
-                proposal_files=[
-                    cfg.DATASETS.PROPOSAL_FILES_TEST[list(cfg.DATASETS.TEST).index(x)] for x in dataset_name
-                ]
-                if cfg.MODEL.LOAD_PROPOSALS
-                else None,
+                proposal_files=None,
             )
-            scenario = ContinualDetectron(
+            scenario = wrapper(
                 dataset,
                 # Continuum related:
                 initial_increment=cfg.CONT.BASE_CLS, increment=cfg.CONT.INC_CLS,
-                nb_classes=cfg.MODEL.SEM_SEG_HEAD.NUM_CLASSES - 1, class_mapper=class_mapper,
+                nb_classes=n_classes,
                 save_indexes=os.getenv("DETECTRON2_DATASETS", "datasets") + '/' + cfg.TASK_NAME,
                 mode=cfg.CONT.MODE, class_order=cfg.CONT.ORDER,
                 # Mask2Former related:
-                mapper=mapper, cfg=cfg
+                mapper=mapper, cfg=cfg, masking_value=0,
             )
             cls.scenario = scenario[cfg.CONT.TASK]
         else:
@@ -412,7 +446,7 @@ class IncrementalTrainer(TrainerBase):
         evaluator_list = []
         evaluator_type = MetadataCatalog.get(dataset_name).evaluator_type
         # semantic segmentation
-        if evaluator_type in ["sem_seg"]:
+        if evaluator_type in ["sem_seg"]:  # , "ade20k_panoptic_seg"]:
             evaluator_list.append(
                 ContinualSemSegEvaluator(
                     cfg,
@@ -421,6 +455,14 @@ class IncrementalTrainer(TrainerBase):
                     output_dir=output_folder,
                 )
             )
+        if evaluator_type == "coco":
+            evaluator_list.append(COCOEvaluator(dataset_name, output_dir=output_folder))
+        if evaluator_type == "ade20k_panoptic_seg" and cfg.MODEL.MASK_FORMER.TEST.INSTANCE_ON:
+            evaluator_list.append(InstanceSegEvaluator(dataset_name, output_dir=output_folder))
+        if evaluator_type == "ade20k_panoptic_seg" and cfg.MODEL.MASK_FORMER.TEST.PANOPTIC_ON:
+            evaluator_list.append(ContinualCOCOPanopticEvaluator(dataset_name, output_folder))
+
+
         if len(evaluator_list) == 0:
             raise NotImplementedError(
                 "no Evaluator for the dataset {} with the type {}".format(
@@ -570,6 +612,37 @@ class IncrementalTrainer(TrainerBase):
                 out.write(f"{name},{self.cfg.CONT.TASK},{res['mACC']},{res['pACC']},-,")
                 out.write(",".join([str(i) for i in cls_acc]))
                 out.write("\n")
+        if 'panoptic_seg' in results:
+            res = results['panoptic_seg']
+            cls_pq = OrderedDict()
+            cls_rq = OrderedDict()
+            cls_sq = OrderedDict()
+            for k in res:
+                if k.startswith("PQ_c"):
+                    cls_pq[int(k[4:])] = res[k]
+                if k.startswith("RQ_c"):
+                    cls_rq[int(k[4:])] = res[k]
+                if k.startswith("SQ_c"):
+                    cls_sq[int(k[4:])] = res[k]
+            with open(path, "a") as out:
+                out.write(f"{name},{self.cfg.CONT.TASK},{res['PQ']},{res['RQ']},{res['SQ']},")
+                out.write(",".join([str(i) for i in cls_pq.values()]))
+                out.write(f",")
+                out.write(",".join([str(i) for i in cls_rq.values()]))
+                out.write(f",")
+                out.write(",".join([str(i) for i in cls_sq.values()]))
+                out.write("\n")
+        if 'segm' in results:
+            res = results['segm']
+            path = f"results/{self.cfg.TASK_NAME}.csv"
+            class_ap = []
+            for k in res:
+                if k.startswith("AP-"):
+                    class_ap.append(res[k])
+            with open(path, "a") as out: # "AP", "AP50", "AP75", "APs", "APm", "APl"
+                out.write(f"{name},{self.cfg.CONT.TASK},{res['AP']},{res['AP50']},{res['AP75']},")
+                out.write(",".join([str(i) for i in class_ap]))
+                out.write("\n")
 
 
 def setup(args):
@@ -577,6 +650,8 @@ def setup(args):
     Create configs and perform basic setups.
     """
     cfg = get_cfg()
+    cfg.NAME = "Exp"
+
     # for poly lr schedule
     add_deeplab_config(cfg)
     add_maskformer2_config(cfg)
@@ -584,26 +659,33 @@ def setup(args):
     cfg.merge_from_file(args.config_file)
     cfg.merge_from_list(args.opts)
 
-    if cfg.CONT.MODE == 'overlap':
-        cfg.TASK_NAME = f"{cfg.DATASETS.TRAIN[0][:3]}_{cfg.CONT.BASE_CLS}-{cfg.CONT.INC_CLS}-ov"
-    elif cfg.CONT.MODE == "disjoint":
-        cfg.TASK_NAME = f"{cfg.DATASETS.TRAIN[0][:3]}_{cfg.CONT.BASE_CLS}-{cfg.CONT.INC_CLS}-dis"
+    if cfg.MODEL.MASK_FORMER.TEST.PANOPTIC_ON:
+        suffix = "-pan"
+    elif cfg.MODEL.MASK_FORMER.TEST.INSTANCE_ON:
+        suffix = "-ins"
     else:
-        cfg.TASK_NAME = f"{cfg.DATASETS.TRAIN[0][:3]}_{cfg.CONT.BASE_CLS}-{cfg.CONT.INC_CLS}-seq"
+        suffix = ""
+
+    if cfg.CONT.MODE == 'overlap':
+        cfg.TASK_NAME = f"{cfg.DATASETS.TRAIN[0][:3]}{suffix}_{cfg.CONT.BASE_CLS}-{cfg.CONT.INC_CLS}-ov"
+    elif cfg.CONT.MODE == "disjoint":
+        cfg.TASK_NAME = f"{cfg.DATASETS.TRAIN[0][:3]}{suffix}_{cfg.CONT.BASE_CLS}-{cfg.CONT.INC_CLS}-dis"
+    else:
+        cfg.TASK_NAME = f"{cfg.DATASETS.TRAIN[0][:3]}{suffix}_{cfg.CONT.BASE_CLS}-{cfg.CONT.INC_CLS}-seq"
+
+    if cfg.CONT.ORDER_NAME is not None:
+        cfg.TASK_NAME += "-" + cfg.CONT.ORDER_NAME
 
     cfg.OUTPUT_ROOT = cfg.OUTPUT_DIR
     cfg.OUTPUT_DIR = cfg.OUTPUT_DIR + "/" + cfg.TASK_NAME + "/" + cfg.NAME + "/step" + str(cfg.CONT.TASK)
-
-    # if cfg.CONT.TASK > 0:
-    #     cfg.SOLVER.BASE_LR = 0.00001
 
     cfg.freeze()
     default_setup(cfg, args)
 
     # Setup logger for "mask_former" module
     setup_logger(output=cfg.OUTPUT_DIR, distributed_rank=comm.get_rank(), name="mask2former")
-    if comm.get_rank() == 0:
-        wandb.init(project="cont_segm", entity="fcdl94", name=cfg.NAME + "_step" + str(cfg.CONT.TASK),
+    if comm.get_rank() == 0 and cfg.WANDB:
+        wandb.init(project="ContM2F", entity="fcdl94", name=cfg.NAME + "_step" + str(cfg.CONT.TASK),
                    config=cfg, sync_tensorboard=True, group=cfg.TASK_NAME, settings=wandb.Settings(start_method="fork"))
 
     return cfg
@@ -619,9 +701,6 @@ def main(args):
         else:  # load from cfg
             cfg.MODEL.WEIGHTS = cfg.CONT.WEIGHTS
 
-        if cfg.CONT.AUG:
-            # cfg.INPUT.MIN_SIZE_TRAIN = [460, 512, 563, 614, 665, 716, 768, 819, 870, 921, 972, 1024]
-            cfg.INPUT.MIN_SIZE_TRAIN = [460, 512, 563, 614, 665, 716, 768]
         cfg.freeze()
 
     if args.eval_only:

@@ -58,6 +58,7 @@ from mask2former import (
     SemanticSegmentorWithTTA,
     add_maskformer2_config,
 )
+from continual.evaluation import ContinualSemSegEvaluator, ContinualCOCOPanopticEvaluator
 
 
 class Trainer(DefaultTrainer):
@@ -79,7 +80,7 @@ class Trainer(DefaultTrainer):
         evaluator_list = []
         evaluator_type = MetadataCatalog.get(dataset_name).evaluator_type
         # semantic segmentation
-        if evaluator_type in ["sem_seg", "ade20k_panoptic_seg"]:
+        if evaluator_type in ["sem_seg"]: #, "ade20k_panoptic_seg"]:
             evaluator_list.append(
                 SemSegEvaluator(
                     dataset_name,
@@ -98,7 +99,7 @@ class Trainer(DefaultTrainer):
             "mapillary_vistas_panoptic_seg",
         ]:
             if cfg.MODEL.MASK_FORMER.TEST.PANOPTIC_ON:
-                evaluator_list.append(COCOPanopticEvaluator(dataset_name, output_folder))
+                evaluator_list.append(ContinualCOCOPanopticEvaluator(dataset_name, output_folder))
         # COCO
         if evaluator_type == "coco_panoptic_seg" and cfg.MODEL.MASK_FORMER.TEST.INSTANCE_ON:
             evaluator_list.append(COCOEvaluator(dataset_name, output_dir=output_folder))
@@ -283,18 +284,29 @@ def setup(args):
     Create configs and perform basic setups.
     """
     cfg = get_cfg()
+    cfg.NAME = "Exp"
     # for poly lr schedule
     add_deeplab_config(cfg)
     add_maskformer2_config(cfg)
     cfg.merge_from_file(args.config_file)
     cfg.merge_from_list(args.opts)
+
+    cfg.OUTPUT_ROOT = cfg.OUTPUT_DIR
+    cfg.OUTPUT_DIR = cfg.OUTPUT_DIR + "/" + cfg.NAME
+
     cfg.freeze()
     default_setup(cfg, args)
     # Setup logger for "mask_former" module
+
     setup_logger(output=cfg.OUTPUT_DIR, distributed_rank=comm.get_rank(), name="mask2former")
+    tags = []
+    if cfg.MODEL.MASK_FORMER.TEST.PANOPTIC_ON:
+        tags.append('panoptic')
+    elif cfg.MODEL.MASK_FORMER.TEST.INSTANCE_ON:
+        tags.append('instance')
     if comm.get_rank() == 0:
-        wandb.init(project="cont_segm", entity="fcdl94", name=cfg.OUTPUT_DIR.split("/")[-1],
-                   config=cfg, sync_tensorboard=True)
+        wandb.init(project="ContM2F", entity="fcdl94", name=cfg.NAME, tags=tags,
+                   config=cfg, sync_tensorboard=True, group=f"{cfg.DATASETS.TRAIN[0][:3]}-full", settings=wandb.Settings(start_method="fork"))
 
     return cfg
 
@@ -305,7 +317,7 @@ def main(args):
     if args.eval_only:
         model = Trainer.build_model(cfg)
         DetectionCheckpointer(model, save_dir=cfg.OUTPUT_DIR).resume_or_load(
-            cfg.MODEL.WEIGHTS
+            cfg.MODEL.WEIGHTS, resume=args.resume
         )
         res = Trainer.test(cfg, model)
         if cfg.TEST.AUG.ENABLED:
@@ -315,7 +327,7 @@ def main(args):
         return res
 
     trainer = Trainer(cfg)
-    trainer.resume_or_load()
+    trainer.resume_or_load(resume=args.resume)
     ret = trainer.train()
     if comm.get_rank() == 0:
         wandb.finish()

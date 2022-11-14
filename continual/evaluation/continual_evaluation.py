@@ -91,10 +91,12 @@ class ContinualSemSegEvaluator(DatasetEvaluator):
                 segmentation prediction in the same format.
         """
         for input, output in zip(inputs, outputs):
+
             output = output["sem_seg"].argmax(dim=0).to(self._cpu_device)
             pred = np.array(output, dtype=np.int)
-            with PathManager.open(self.input_file_to_gt_file[input["file_name"]], "rb") as f:
-                gt = np.array(Image.open(f), dtype=np.int)
+            # with PathManager.open(self.input_file_to_gt_file[input["file_name"]], "rb") as f:
+            #     gt = np.array(Image.open(f), dtype=np.int)
+            gt = np.array(input['sem_seg'], dtype=np.int)
 
             gt[gt == self._ignore_label] = self._num_classes
 

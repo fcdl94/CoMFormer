@@ -9,5 +9,3 @@ MODEL:
     OUT_FEATURES: ["res2", "res3", "res4", "res5"]
     NORM: "SyncBN"
     RES5_MULTI_GRID: [1, 1, 1]  # not used
-CONT:
-  ORDER: !!python/object/apply:eval ["[x for x in range(1, 151)]"]

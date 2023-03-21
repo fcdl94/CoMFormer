@@ -1,87 +1,64 @@
-# Mask2Former: Masked-attention Mask Transformer for Universal Image Segmentation
+# CoMFormer: Continual Learning in Semantic and Panoptic Segmentation
 
-[Bowen Cheng](https://bowenc0221.github.io/), [Ishan Misra](https://imisra.github.io/), [Alexander G. Schwing](https://alexander-schwing.de/), [Alexander Kirillov](https://alexander-kirillov.github.io/), [Rohit Girdhar](https://rohitgirdhar.github.io/)
 
-[[`arXiv`](https://arxiv.org/abs/2112.01527)] [[`Project`](https://bowenc0221.github.io/mask2former)] [[`BibTeX`](#CitingMask2Former)]
+[Fabio Cermelli](https://fcdl94.github.io/), Matthieu Cord, Arthur Douillard
+
+[ [`arXiv`](https://arxiv.org/abs/2211.13999/) ] [ [`BibTeX`](#Citing) ]
 
 [comment]: <> (<div align="center">)
 
-[comment]: <> (  <img src="https://bowenc0221.github.io/images/maskformerv2_teaser.png" width="100%" height="100%"/>)
+[comment]: <> (<img src="https://bowenc0221.github.io/images/maskformerv2_teaser.png" width="100%" height="100%"/>)
 
 [comment]: <> (</div><br/>)
 
-### Features
-* A single architecture for panoptic, instance and semantic segmentation.
-* Support major segmentation datasets: ADE20K, Cityscapes, COCO, Mapillary Vistas.
-
-## Updates
-* Add Google Colab demo.
-* Video instance segmentation is now supported! Please check our [tech report](https://arxiv.org/abs/2112.10764) for more details.
-
 ## Installation
-
 See [installation instructions](INSTALL.md).
 
 ## Getting Started
 
+### Prepare the datasets
 See [Preparing Datasets for Mask2Former](datasets/README.md).
 
-See [Getting Started with Mask2Former](GETTING_STARTED.md).
+### How to configure the methods:
+Per-Pixel baseline:
+`MODEL.MASK_FORMER.PER_PIXEL True`
 
-Run our demo using Colab: [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1uIWE5KbGFSjrxey2aRd5pWkKNY1_SaNq)
+Mask-based methods:
+`MODEL.MASK_FORMER.SOFTMASK True MODEL.MASK_FORMER.FOCAL True`
 
-Integrated into [Huggingface Spaces 🤗](https://huggingface.co/spaces) using [Gradio](https://github.com/gradio-app/gradio). Try out the Web Demo: [![Hugging Face Spaces](https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Spaces-blue)](https://huggingface.co/spaces/akhaliq/Mask2Former)
+CoMFormer:
+`CONT.DIST.PSEUDO True CONT.DIST.KD_WEIGHT 10.0 CONT.DIST.UKD True CONT.DIST.KD_REW True`
 
-Replicate web demo and docker image is available here: [![Replicate](https://replicate.com/facebookresearch/mask2former/badge)](https://replicate.com/facebookresearch/mask2former)
+MiB:
+`CONT.DIST.KD_WEIGHT 200.0 CONT.DIST.UKD True CONT.DIST.UCE True`
 
-## Advanced usage
+PLOP:
+`CONT.DIST.PSEUDO True CONT.DIST.PSEUDO_TYPE 1  CONT.DIST.POD_WEIGHT 0.001`
 
-See [Advanced Usage of Mask2Former](ADVANCED_USAGE.md).
+### How to run experiments:
+ADE Semantic Segmenation:
+- Use config file: `cfg_file=configs/ade20k/semantic-segmentation/maskformer2_R101_bs16_90k.yaml`
+- 100-50: `CONT.BASE_CLS 100 CONT.INC_CLS 50 CONT.MODE overlap` (see examples in `scripts/ade.sh`) 
+- 100-10: `CONT.BASE_CLS 100 CONT.INC_CLS 10 CONT.MODE overlap` (see examples in `scripts/ade10.sh`)
+- 100-5: `CONT.BASE_CLS 100 CONT.INC_CLS 5 CONT.MODE overlap` (see examples in `scripts/ade5.sh`)
 
-## Model Zoo and Baselines
+ADE Panoptic Segmenation:
+- Use config file: `cfg_file=configs/ade20k/panoptic-segmentation/maskformer2_R50_bs16_90k.yaml`
+- 100-50: `CONT.BASE_CLS 100 CONT.INC_CLS 50 CONT.MODE overlap` (see examples in `scripts/adps.sh`) 
+- 100-10: `CONT.BASE_CLS 100 CONT.INC_CLS 10 CONT.MODE overlap` (see examples in `scripts/adps10.sh`)
+- 100-5: `CONT.BASE_CLS 100 CONT.INC_CLS 5 CONT.MODE overlap` (see examples in `scripts/adps5.sh`)
 
-We provide a large set of baseline results and trained models available for download in the [Mask2Former Model Zoo](MODEL_ZOO.md).
-
-## License
-
-Shield: [![CC BY-NC 4.0][cc-by-nc-shield]][cc-by-nc]
-
-The majority of Mask2Former is licensed under a
-[Creative Commons Attribution-NonCommercial 4.0 International License](LICENSE).
-
-[![CC BY-NC 4.0][cc-by-nc-image]][cc-by-nc]
-
-[cc-by-nc]: http://creativecommons.org/licenses/by-nc/4.0/
-[cc-by-nc-image]: https://licensebuttons.net/l/by-nc/4.0/88x31.png
-[cc-by-nc-shield]: https://img.shields.io/badge/License-CC%20BY--NC%204.0-lightgrey.svg
-
-
-However portions of the project are available under separate license terms: Swin-Transformer-Semantic-Segmentation is licensed under the [MIT license](https://github.com/SwinTransformer/Swin-Transformer-Semantic-Segmentation/blob/main/LICENSE), Deformable-DETR is licensed under the [Apache-2.0 License](https://github.com/fundamentalvision/Deformable-DETR/blob/main/LICENSE).
-
-## <a name="CitingMask2Former"></a>Citing Mask2Former
-
-If you use Mask2Former in your research or wish to refer to the baseline results published in the [Model Zoo](MODEL_ZOO.md), please use the following BibTeX entry.
+## <a name="Citing"></a>Citing CoMFormer
+If you use CoMFormer in your research, please use the following BibTeX entry.
 
 ```BibTeX
-@article{cheng2021mask2former,
-  title={Masked-attention Mask Transformer for Universal Image Segmentation},
-  author={Bowen Cheng and Ishan Misra and Alexander G. Schwing and Alexander Kirillov and Rohit Girdhar},
-  journal={arXiv},
-  year={2021}
-}
-```
-
-If you find the code useful, please also consider the following BibTeX entry.
-
-```BibTeX
-@inproceedings{cheng2021maskformer,
-  title={Per-Pixel Classification is Not All You Need for Semantic Segmentation},
-  author={Bowen Cheng and Alexander G. Schwing and Alexander Kirillov},
-  journal={NeurIPS},
-  year={2021}
+@article{cermelli2023comformer,
+  title={CoMFormer: Continual Learning in Semantic and Panoptic Segmentation},
+  author={Fabio Cermelli and Matthieu Cord and Arthur Douillard},
+  journal={IEEE/CVF Computer Vision and Pattern Recognition Conference},
+  year={2023}
 }
 ```
 
 ## Acknowledgement
-
-Code is largely based on MaskFormer (https://github.com/facebookresearch/MaskFormer).
+The code is largely based on [Mask2Former](https://github.com/facebookresearch/Mask2Former).

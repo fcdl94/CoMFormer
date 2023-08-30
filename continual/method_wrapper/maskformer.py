@@ -178,6 +178,7 @@ class MaskFormerDistillation(BaseDistillation):
         for k in list(losses.keys()):
             if k in self.criterion.weight_dict:
                 losses[k] *= self.criterion.weight_dict[k]
+            else:
                 # remove this loss if not specified in `weight_dict`
                 losses.pop(k)
 
